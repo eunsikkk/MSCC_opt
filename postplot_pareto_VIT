@@ -126,12 +126,22 @@ ModelUtil.showProgress(true);
 % 5.1) 최적해 요약 MAT 로드
 summary_mat = pick_one_file(run_dir, 'run_summary_*.mat');
 S = load(summary_mat);
+
+% --- 최적 C-rate ---
 C_cccv  = S.optimal_C_rate;          % scalar
 C_mscc2 = S.optimal_C_mscc2(:).';    % [C12 C3456]
 C_mscc3 = S.optimal_C_mscc3(:).';    % [C12 C34 C56]
 C_mscc4 = S.optimal_C_mscc4(:).';    % [C1 C2 C34 C56]
 C_mscc5 = S.optimal_C_mscc5(:).';    % [C1 C2 C3 C4 C56]
 C_mscc6 = S.optimal_C_mscc6(:).';    % [C1 C2 C3 C4 C5 C6]
+
+% --- 각 프로토콜별 최적 충전 시간 [s] (summary 안 변수 이름에 맞게 조정 필요) ---
+t_cccv  = S.cccv_min_t;
+t_mscc2 = S.mscc2_min_t;
+t_mscc3 = S.mscc3_min_t;
+t_mscc4 = S.mscc4_min_t;
+t_mscc5 = S.mscc5_min_t;
+t_mscc6 = S.mscc6_min_t;
 
 % 5.2) 모델 로드
 filepath = 'C:\Users\user\Downloads';
@@ -140,17 +150,15 @@ full_path = fullfile(filepath, filename);
 assert(isfile(full_path),'mph 파일 없음: %s', full_path);
 model = mphload(full_path);
 
-% ===== 로컬 함수들 (run_and_eval 포함)는 파일 맨 아래에 정의 =====
+% 5.4) 실행 (프로토콜당 1회 실행, tlist = range(0,10,t_cycling))
+R_cccv  = run_and_eval('CCCV',  model, C_cccv,  t_cccv);
+R_mscc2 = run_and_eval('MSCC2', model, C_mscc2, t_mscc2);
+R_mscc3 = run_and_eval('MSCC3', model, C_mscc3, t_mscc3);
+R_mscc4 = run_and_eval('MSCC4', model, C_mscc4, t_mscc4);
+R_mscc5 = run_and_eval('MSCC5', model, C_mscc5, t_mscc5);
+R_mscc6 = run_and_eval('MSCC6', model, C_mscc6, t_mscc6);
 
-% 5.4) 실행
-R_cccv  = run_and_eval('CCCV',  model, C_cccv);
-R_mscc2 = run_and_eval('MSCC2', model, C_mscc2);
-R_mscc3 = run_and_eval('MSCC3', model, C_mscc3);
-R_mscc4 = run_and_eval('MSCC4', model, C_mscc4);
-R_mscc5 = run_and_eval('MSCC5', model, C_mscc5);
-R_mscc6 = run_and_eval('MSCC6', model, C_mscc6);
-
-% 5.5) 색상 (위 파레토 팔레트와 동일)
+%% 5.5) 색상 (위 파레토 팔레트와 동일)
 blue    = [0,115,194]/255;   % CCCV
 purple  = [128,0,128]/255;   % MSCC2
 green   = [0.20,0.60,0.20];  % MSCC3
@@ -192,7 +200,6 @@ ax.YAxis(1).Color = 'k';
 ax.YAxis(2).Color = 'k';
 
 export_png(f1, fullfile(fig_out_dir, 'timeseries_voltage_current.png'));
-
 
 %% 5.2) Figure 2 — (liion.Ect) vs time
 f2 = figure(4102); clf; set(gcf,'Color','w'); hold on; grid on;
@@ -260,8 +267,7 @@ ax.YColor = 'k';
 
 export_png(f3, fullfile(fig_out_dir, 'timeseries_temperature.png'));
 
-
-%%  ) 각각 그리기 
+%%  ) 각각 그리기 ----------------------------------------------------------
 
 % 프로토콜 리스트 (이후 플롯용)
 PROT = struct('name',{},'R',{},'color',{});
@@ -366,6 +372,7 @@ ax.YColor = 'k';
 hold off;
 
 export_png(fA, fullfile(fig_out_dir, 'timeseries_anode_potential_all.png'));
+
 %% ======================= Local helper functions ==========================
 function fpath = pick_one_file(folder, pattern)
     L = dir(fullfile(folder, pattern));
@@ -404,9 +411,14 @@ function mask_nd = isNondominatedND(F)
     end
 end
 
-function R = run_and_eval(protocol, model, Cvals)
-    % ===== (0) 공통 출력 간격 설정 =====
-    dt_out = 20;   % [s]
+function R = run_and_eval(protocol, model, Cvals, t_cycling)
+    % run_and_eval
+    %   - protocol : 'CCCV', 'MSCC2', ..., 'MSCC6'
+    %   - Cvals    : 해당 프로토콜의 최적 C-rate 벡터
+    %   - t_cycling: run_summary 에서 읽어온 최적 충전시간 [s]
+    %
+    % 여기서 dt_out 은 COMSOL Output times 의 두 번째 인자에 해당 (예: range(0,10,t_cycling))
+    dt_out = 10;   % [s]  <--  원래 300이던 걸 10초 간격으로 저장하고 싶을 때
 
     % ===== (1) 파라미터 세팅 & 스터디/데이터셋 선택 =====
     switch protocol
@@ -469,38 +481,38 @@ function R = run_and_eval(protocol, model, Cvals)
             error('Unknown protocol');
     end
 
-    % ===== (2) 1차 실행: t_end 추정 =====
-    model.study(studyTag).run();
-    Dt = mpheval(model, {'t','liion.cdc1.CC_CH','liion.cdc1.CV_CH'}, ...
-                 'dataset',dset,'edim','point','selection',2,'solnum','all');
-    t_all = Dt.d1; cc = Dt.d2; cv = Dt.d3;
-    idx_chg = (cc==1) | (cv==1);
-    if any(idx_chg), t_end = t_all(find(idx_chg,1,'last'));
-    else,            t_end = t_all(end);
-    end
-    t_end_rounded = ceil(t_end/dt_out)*dt_out;
+    % ---- (1-1) 최적 시간 t_cycling 파라미터 세팅 ----
+    % COMSOL 모델 안에 't_cycling' 파라미터가 존재해야 함
+    model.param.set('t_cycling', num2str(t_cycling));
 
-    % ===== (3) tlist 세팅 =====
-    set_tlist_safe(model, studyTag, sprintf('range(0,%g,%g)', dt_out, t_end_rounded));
+    % ---- (1-2) Output times = range(0, dt_out, t_cycling) 로 세팅 ----
+    tlist_str = sprintf('range(0,%g,t_cycling)', dt_out);
+    set_tlist_safe(model, studyTag, tlist_str);
 
-    % ===== (4) 2차 실행 =====
+    % ===== (2) 단일 실행 =====
     model.study(studyTag).run();
 
-    % ===== (5) 데이터 취득 =====
-    expr = {'t','E_cell','liion.cdc1.Icell','liion.Ect','T_avg','T_max','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+    % ===== (3) 데이터 취득 =====
+    expr = {'t','E_cell','liion.cdc1.Icell','liion.Ect','T_avg','T_max', ...
+            'liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
     D = mpheval(model, expr, 'dataset',dset,'edim','point','selection',2,'solnum','all');
 
     t  = D.d1;  E  = D.d2;  I  = D.d3;  v = D.d4;
     Ta = toCol(D,5); Tm = toCol(D,6);
     cc = D.d7;  cv = D.d8;
-    idx = (cc==1) | (cv==1); if ~any(idx), idx = true(size(t)); end
+    idx = (cc==1) | (cv==1); 
+    if ~any(idx), idx = true(size(t)); end
 
     R = struct('t',t(idx),'E',E(idx),'I',I(idx), ...
                'vdiff',v(idx),'Tavg',Ta(idx),'Tmax',Tm(idx));
 end
 
 function col = toCol(D, k)
-    try col = D.(['d' num2str(k)]); catch, col = nan(size(D.d1)); end
+    try
+        col = D.(['d' num2str(k)]);
+    catch
+        col = nan(size(D.d1));
+    end
 end
 
 function set_tlist_safe(model, studyTag, tlist_str)
@@ -508,7 +520,8 @@ function set_tlist_safe(model, studyTag, tlist_str)
     for cand = {'time','time1','time2','step1','step2'}
         try
             model.study(studyTag).feature(char(cand)).set('tlist', tlist_str);
-            tried = true; break;
+            tried = true; 
+            break;
         catch
         end
     end
