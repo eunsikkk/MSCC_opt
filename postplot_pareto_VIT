@@ -388,6 +388,72 @@ for k = 1:numel(PROT)
     export_png(fA, out_png);
 end
 
+%% 5.7) Thermal load metrics — ∫ΔT dt, ∫Qh dt per protocol
+%  - Thermal burden:  J_T = ∫ (Tavg(t) - T_init) dt     [K·s ≒ °C·s]
+%  - Heat generation: J_Q = ∫ Qh(t) dt                  [J/m^3]  (Qh: W/m^3)
+
+nP     = numel(PROT);
+names  = {PROT.name};
+colors = vertcat(PROT.color);
+
+J_T = zeros(nP,1);   % ∫ΔT dt
+J_Q = zeros(nP,1);   % ∫Qh dt
+
+for k = 1:nP
+    R = PROT(k).R;
+
+    t    = R.t(:);
+    Tavg = R.Tavg(:);
+    Qh   = R.Qh(:);
+
+    % 각 프로토콜 자기 초기온도를 기준으로 ΔT 계산
+    T_init = Tavg(1);
+
+    dT = Tavg - T_init;          % [K]
+    J_T(k) = trapz(t, dT);       % [K·s] ≒ [°C·s]
+    J_Q(k) = trapz(t, Qh);       % [J/m^3]  (Qh: W/m^3 → 시간적분)
+end
+
+% --- (1) ∫ΔT dt bar plot --------------------------------------------------
+fDT = figure(4501); clf; set(gcf,'Color','w');
+b1 = bar(J_T);
+b1.FaceColor = 'flat';
+for k = 1:nP
+    b1.CData(k,:) = colors(k,:);
+end
+grid on;
+
+xticks(1:nP);
+xticklabels(names);
+xlabel('Protocol');
+ylabel('\int \DeltaT_{avg}(t)\, dt  (°C·s)');
+title('Thermal burden: \int (T_{avg}(t) - T_{init}) dt (Optimal C)');
+set(gca,'FontSize',11);
+
+out_DT = fullfile(fig_out_dir, 'thermal_JT_integral_deltaTavg.png');
+export_png(fDT, out_DT);
+fprintf('Saved: %s\n', out_DT);
+
+% --- (2) ∫Qh dt bar plot --------------------------------------------------
+fQh = figure(4502); clf; set(gcf,'Color','w');
+b2 = bar(J_Q);
+b2.FaceColor = 'flat';
+for k = 1:nP
+    b2.CData(k,:) = colors(k,:);
+end
+grid on;
+
+xticks(1:nP);
+xticklabels(names);
+xlabel('Protocol');
+ylabel('\int Q_h(t)\, dt  (J/m^3)');
+title('Total heat generation: \int Q_h(t) dt (Optimal C)');
+set(gca,'FontSize',11);
+
+out_Qh = fullfile(fig_out_dir, 'thermal_JQ_integral_Qh.png');
+export_png(fQh, out_Qh);
+fprintf('Saved: %s\n', out_Qh);
+
 
 %% ======================= Local helper functions ==========================
 function fpath = pick_one_file(folder, pattern)
@@ -510,18 +576,23 @@ function R = run_and_eval(protocol, model, Cvals, t_cycling)
 
     % ===== (3) 데이터 취득 =====
     expr = {'t','E_cell','liion.cdc1.Icell','liion.Ect','T_avg','T_max', ...
-            'liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+            'liion.cdc1.CC_CH','liion.cdc1.CV_CH', ...
+            'liion.Qh'};   % ★ liion.Qh 추가
     D = mpheval(model, expr, 'dataset',dset,'edim','point','selection',2,'solnum','all');
 
     t  = D.d1;  E  = D.d2;  I  = D.d3;  v = D.d4;
     Ta = toCol(D,5); Tm = toCol(D,6);
     cc = D.d7;  cv = D.d8;
+    Qh = toCol(D,9);    % ★ Qh 시계열
+
     idx = (cc==1) | (cv==1); 
     if ~any(idx), idx = true(size(t)); end
 
     R = struct('t',t(idx),'E',E(idx),'I',I(idx), ...
-               'vdiff',v(idx),'Tavg',Ta(idx),'Tmax',Tm(idx));
+               'vdiff',v(idx),'Tavg',Ta(idx),'Tmax',Tm(idx), ...
+               'Qh',Qh(idx));   % ★ R에 Qh 추가
 end
+
 
 function col = toCol(D, k)
     try
@@ -553,3 +624,4 @@ function set_tlist_safe(model, studyTag, tlist_str)
         warning('tlist 설정 실패: study=%s (기본 설정으로 계속 진행)', studyTag);
     end
 end
+
