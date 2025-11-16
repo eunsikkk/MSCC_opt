@@ -151,11 +151,24 @@ assert(isfile(full_path),'mph 파일 없음: %s', full_path);
 model = mphload(full_path);
 
 % 5.4) 실행 (프로토콜당 1회 실행, tlist = range(0,10,t_cycling))
+% 5.4) 실행 (프로토콜당 1회 실행, tlist = range(0,10,t_cycling))
+
+fprintf('\n[SIM] Running CCCV...\n');
 R_cccv  = run_and_eval('CCCV',  model, C_cccv,  t_cccv);
+
+fprintf('\n[SIM] Running MSCC2...\n');
 R_mscc2 = run_and_eval('MSCC2', model, C_mscc2, t_mscc2);
+
+fprintf('\n[SIM] Running MSCC3...\n');
 R_mscc3 = run_and_eval('MSCC3', model, C_mscc3, t_mscc3);
+
+fprintf('\n[SIM] Running MSCC4...\n');
 R_mscc4 = run_and_eval('MSCC4', model, C_mscc4, t_mscc4);
+
+fprintf('\n[SIM] Running MSCC5...\n');
 R_mscc5 = run_and_eval('MSCC5', model, C_mscc5, t_mscc5);
+
+fprintf('\n[SIM] Running MSCC6...\n');
 R_mscc6 = run_and_eval('MSCC6', model, C_mscc6, t_mscc6);
 
 %% 5.5) 색상 (위 파레토 팔레트와 동일)
@@ -348,30 +361,33 @@ for k = 1:numel(PROT)
     export_png(fT, out_png);
 end
 
-%% 5.6) Anode potential vs time — 모든 프로토콜을 한 그림에
-fA = figure(4401); clf;
-set(gcf,'Color','w');
-grid off; hold on;
+%% 5.6) Anode potential vs time — 프로토콜별 개별 플롯
+for k = 1:numel(PROT)
+    P = PROT(k);
+    R = P.R;
 
-plot(R_cccv.t,  R_cccv.vdiff,  'LineWidth',1.6, 'Color',blue);
-plot(R_mscc2.t, R_mscc2.vdiff, 'LineWidth',1.6, 'Color',purple);
-plot(R_mscc3.t, R_mscc3.vdiff, 'LineWidth',1.6, 'Color',green);
-plot(R_mscc4.t, R_mscc4.vdiff, 'LineWidth',1.6, 'Color',red);
-plot(R_mscc5.t, R_mscc5.vdiff, 'LineWidth',1.6, 'Color',orange);
-plot(R_mscc6.t, R_mscc6.vdiff, 'LineWidth',1.6, 'Color',gray);
+    fA = figure(4400+k); clf;
+    set(gcf,'Color','w');
+    grid off; hold on;
 
-xlabel('t (s)');
-ylabel('Anode potential (V)');
-title('Anode potential vs time (Optimal C)');
-legend({'CCCV','MSCC2','MSCC3','MSCC4','MSCC5','MSCC6'}, 'Location','best');
+    plot(R.t, R.vdiff, 'LineWidth',1.6, 'Color', P.color);
 
-ax = gca;
-ax.XColor = 'k';
-ax.YColor = 'k';
+    xlabel('t (s)');
+    ylabel('Anode potential (V)');
+    title(sprintf('Anode potential vs time (Optimal C, %s)', P.name));
+    legend({P.name}, 'Location','best');
 
-hold off;
+    ax = gca;
+    ax.XColor = 'k';
+    ax.YColor = 'k';
 
-export_png(fA, fullfile(fig_out_dir, 'timeseries_anode_potential_all.png'));
+    hold off;
+
+    out_png = fullfile(fig_out_dir, ...
+        sprintf('timeseries_anode_potential_%s.png', P.name));
+    export_png(fA, out_png);
+end
+
 
 %% ======================= Local helper functions ==========================
 function fpath = pick_one_file(folder, pattern)
@@ -418,7 +434,7 @@ function R = run_and_eval(protocol, model, Cvals, t_cycling)
     %   - t_cycling: run_summary 에서 읽어온 최적 충전시간 [s]
     %
     % 여기서 dt_out 은 COMSOL Output times 의 두 번째 인자에 해당 (예: range(0,10,t_cycling))
-    dt_out = 10;   % [s]  <--  원래 300이던 걸 10초 간격으로 저장하고 싶을 때
+    dt_out = 5;   % [s]  <--  원래 300이던 걸 10초 간격으로 저장하고 싶을 때
 
     % ===== (1) 파라미터 세팅 & 스터디/데이터셋 선택 =====
     switch protocol
