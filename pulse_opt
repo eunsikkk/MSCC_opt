@@ -1,0 +1,205 @@
+% =========================================================================
+% COMSOL-MATLAB: MSCC+Pulse 전용 최적화 (C1,C2=6C 고정, 6개 변수 탐색)
+% =========================================================================
+clc; clear; close all;
+import com.comsol.model.*
+import com.comsol.model.util.*
+
+%% 0) 경로/출력 폴더 --------------------------------------------------------
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\MSCC_CCCV_opt';
+assert(isfolder(base_dir), '기본 폴더가 없습니다: %s', base_dir);
+ts = datestr(now,'yyyymmdd_HHMMSS');
+out_dir = fullfile(base_dir, ['run_pulse_' ts]);
+ts_dir  = fullfile(out_dir, 'timeseries');
+if ~isfolder(out_dir), mkdir(out_dir); end
+if ~isfolder(ts_dir),  mkdir(ts_dir);  end
+
+fn_pulse = fullfile(out_dir, ['pulse_mscc_optimization_log_' ts '.csv']);
+
+% 안전 임계 및 surrogateopt 예산
+safety_eps = 0.05;   % [V]  min(phis-phil) > safety_eps 유지
+N_EVALS_P  = 100;    % surrogateopt MaxFunctionEvaluations (필요시 조정)
+
+%% 1) 모델 로드 -------------------------------------------------------------
+filepath = 'C:\Users\user\Downloads';
+filename = 'ES_MSCC_PC_1116.mph';  % std3/dset37 포함 모델
+full_path = fullfile(filepath, filename);
+assert(isfile(full_path),'mph 파일 없음: %s', full_path);
+
+model = mphload(full_path);
+ModelUtil.showProgress(true);
+disp('모델 불러오기 완료.');
+
+%% 2) 로그 헤더 생성 --------------------------------------------------------
+% [C3 C4 SOC_start SOC_duration I_rest pulse_period_s duty T s T_avg T_max]
+if ~isfile(fn_pulse)
+% Pulse 로그 헤더
+T = table('Size',[0 12], 'VariableTypes', repmat({'double'},1,12), ...
+    'VariableNames', {'C2','C3','C4','SOC_start','SOC_duration','I_rest','pulse_period_s','duty','T','s','T_avg','T_max'});
+writetable(T, fn_pulse);
+end
+
+%% 3) 최적화: MSCC+Pulse (C1=C2=6 고정, 6개 변수) --------------------------
+disp('===== MSCC+Pulse 최적화를 시작합니다 (C1=6 고정) =====');
+% x = [C3, C4, SOC_start, SOC_duration, I_rest, pulse_period_s], duty=0.5
+% x = [C2, C3, C4, SOC_start, SOC_duration, I_rest, pulse_period_s]
+lbP = [ 0.1, 0.5, 0.5, 0.30, 0.05, -0.3,  1 ];
+ubP = [ 6.0, 6.0, 6.0, 0.80, 0.30,  0.3, 200 ];
+
+
+obj_pulse = @(x) evaluate_and_log_PULSE_MSCC(x, model, safety_eps, fn_pulse);
+
+opts_pulse = optimoptions('surrogateopt', ...
+    'MaxFunctionEvaluations', N_EVALS_P, ...
+    'Display','iter', 'PlotFcn','surrogateoptplot');
+
+[opt_x_pulse, pulse_min_time, exitflag_pulse, output_pulse, trials_pulse] = ...
+    surrogateopt(obj_pulse, lbP, ubP, opts_pulse);
+
+fprintf('\n--- MSCC+Pulse 최적화 결과 ---\n');
+fprintf('C1=6 (고정), C2=%.3f (최적화)\n', opt_x_pulse(1));
+fprintf('C3 = %.3f C, C4 = %.3f C\n', opt_x_pulse(2), opt_x_pulse(3));
+fprintf('SOC_start = %.3f, SOC_duration = %.3f (end=%.3f)\n', ...
+        opt_x_pulse(4), opt_x_pulse(5), opt_x_pulse(4)+opt_x_pulse(5));
+fprintf('I_rest = %.3f C\n', opt_x_pulse(6));
+fprintf('pulse_period = %.1f s, duty=0.5\n', opt_x_pulse(7));
+fprintf('최적 충전 시간: %.2f s\n', pulse_min_time);
+%% 4) 최적해 시계열 저장 (OPT only) ----------------------------------------
+dump_timeseries_PULSE(model, opt_x_pulse, ts_dir);  % 내부에서 MSCC_pulse_opt.csv 저장
+
+%% 5) 요약 MAT 저장 ---------------------------------------------------------
+save(fullfile(out_dir, ['ONLY_PULSE_run_summary_' ts '.mat']), ...
+    'opt_x_pulse','pulse_min_time','trials_pulse','exitflag_pulse','output_pulse', ...
+    'fn_pulse','safety_eps','N_EVALS_P','full_path','out_dir','ts_dir');
+
+fprintf('CSV/MAT 저장 완료.\n출력 폴더: %s\n', out_dir);
+
+% ============================ Local Functions =============================
+function cost = evaluate_and_log_PULSE_MSCC(x, model, safety_eps, fn_csv)
+    % x = [C2, C3, C4, s0, sd, Irest, Tper]
+    persistent f_count
+    if isempty(f_count), f_count=0; end
+    f_count = f_count + 1;
+
+    C2 = x(1); C3 = x(2); C4 = x(3);
+    s0 = x(4); sd = x(5); s1 = s0 + sd;
+    Irest = x(6); Tper = x(7); duty = 0.5;
+
+    PENALTY_HARD = 1e9; PENALTY_SOFT = 1e8; PENALTY_SAFE = 2e7;
+
+    % --- 진행중 파라미터 정확히 로깅 ---
+    fprintf(['[Pulse  F%04d]  C2=%.3f, C3=%.3f, C4=%.3f, ', ...
+             'SOC_start=%.3f, dur=%.3f, end=%.3f, I_rest=%.3f, period=%.1f s  (%s)\n'], ...
+            f_count, C2, C3, C4, s0, sd, s1, Irest, Tper, datestr(now,'HH:MM:SS.FFF'));
+
+    % --- 유효성 ---
+    if any(~isfinite([C2 C3 C4 s0 sd Irest Tper])) || Tper<=0 || s0<0 || sd<=0 || s1<=s0 || s1>0.898
+        cost = PENALTY_HARD; return;
+    end
+
+    % --- COMSOL 파라미터 세팅 ---
+    try
+        model.param.set('first_MSCC_Crate','6');                 % C1 고정
+        model.param.set('second_MSCC_Crate', num2str(C2));       % C2 최적화
+        model.param.set('third_MSCC_Crate',  num2str(C3));
+        model.param.set('fourth_MSCC_Crate', num2str(C4));
+        model.param.set('pulse_start_soc_param',           num2str(s0));
+        model.param.set('pulse_duration_soc_param',        num2str(sd));
+        model.param.set('pulse_rest_current_param_coeffi', num2str(Irest));
+        model.param.set('pulse_freq', [num2str(Tper) '[s]']);    % period 단위 그대로
+        model.param.set('duty_cycle','0.66');
+    catch
+        cost = PENALTY_HARD; return;
+    end
+
+    % --- 실행 & 평가 (기존 로직 그대로) ---
+    if ~try_run_study(model,'std3')
+        if ~try_run_study(model,'std3'), cost = PENALTY_SOFT; return; end
+    end
+    [ok, D] = try_mpheval(model, {'t','phis-phil','liion.cdc1.CC_CH','liion.cdc1.CV_CH'}, 'dset37');
+    if ~ok, cost = PENALTY_SOFT; return; end
+    t=D.d1; over=D.d2; cc=D.d3; cv=D.d4; idx=(cc==1)|(cv==1);
+    if ~any(idx), cost = PENALTY_SOFT; return; end
+
+    Tmin = min(over(idx));
+    [Tavg_val, Tmax_val] = get_temp_peaks(model,'dset37');
+
+    if ~isfinite(Tmin) || Tmin <= safety_eps
+        append_pulse_row(fn_csv, [C2, C3, C4, s0, sd, Irest, Tper, duty, NaN, Tmin, Tavg_val, Tmax_val]);
+        cost = PENALTY_SAFE + 1e6*(safety_eps - Tmin); return;
+    end
+
+    Tcharge = t(find(idx,1,'last'));
+    cost = Tcharge;
+
+    fprintf('   → 성공 | T=%.2f s, min(phis-phil)=%.4f V, Tavg=%.2f, Tmax=%.2f\n', Tcharge, Tmin, Tavg_val, Tmax_val);
+    append_pulse_row(fn_csv, [C2, C3, C4, s0, sd, Irest, Tper, duty, Tcharge, Tmin, Tavg_val, Tmax_val]);
+end
+
+% ---------- Timeseries dump ----------
+function dump_timeseries_PULSE(model, x, ts_dir)
+    % x = [C2 C3 C4 s0 sd Irest Tper]
+    C2=x(1); C3=x(2); C4=x(3); s0=x(4); sd=x(5); Irest=x(6); Tper=x(7);
+    model.param.set('first_MSCC_Crate','6');
+    model.param.set('second_MSCC_Crate', num2str(C2));
+    model.param.set('third_MSCC_Crate',  num2str(C3));
+    model.param.set('fourth_MSCC_Crate', num2str(C4));
+    model.param.set('pulse_start_soc_param',           num2str(s0));
+    model.param.set('pulse_duration_soc_param',        num2str(sd));
+    model.param.set('pulse_rest_current_param_coeffi', num2str(Irest));
+    model.param.set('pulse_freq', [num2str(Tper) '[s]']);
+    model.param.set('duty_cycle','0.5');
+    % 이하 동일…
+
+    if ~try_run_study(model,'std3')
+        if ~try_run_study(model,'std3'), warning('Pulse 최적해 재실행 실패'); return; end
+    end
+    expr = {'t','E_cell','liion.cdc1.Icell','SOC','phis-phil','liion.cdc1.CC_CH','liion.cdc1.CV_CH','T_avg','T_max'};
+    D = mpheval(model, expr, 'dataset','dset37','edim','point','selection',2,'solnum','all');
+    Tavg_ts = toColSafe(D,8); Tmax_ts = toColSafe(D,9);
+    idx = (D.d6==1) | (D.d7==1);
+    tbl = table(D.d1(idx), D.d2(idx), D.d3(idx), D.d4(idx), D.d5(idx), D.d6(idx), D.d7(idx), Tavg_ts(idx), Tmax_ts(idx), ...
+        'VariableNames',{'t','E_cell','I_cell','SOC','phis_minus_phil','CC_flag','CV_flag','T_avg','T_max'});
+    fn = fullfile(ts_dir,'MSCC_pulse_opt.csv');
+    writetable(tbl, fn);
+    fprintf('Pulse OPT 시계열 저장: %s\n', fn);
+end
+
+% ---------- Metrics helpers ----------
+function [Tavg_peak, Tmax_peak] = get_temp_peaks(model, dset)
+    Tavg_peak = nan; Tmax_peak = nan;
+    try
+        G = mpheval(model,'T_avg','dataset',dset,'edim','domain','solnum','all');
+        Tavg_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+    try
+        G = mpheval(model,'T_max','dataset',dset,'edim','domain','solnum','all');
+        Tmax_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+end
+
+function append_pulse_row(fn, row)
+    % row = [C2 C3 C4 s0 sd Irest Tper duty T s Tavg Tmax]
+    T = table(row(1),row(2),row(3),row(4),row(5),row(6),row(7),row(8),row(9),row(10),row(11),row(12), ...
+        'VariableNames', {'C2','C3','C4','SOC_start','SOC_duration','I_rest','pulse_period_s','duty','T','s','T_avg','T_max'});
+    writetable(T, fn, 'WriteMode','Append');
+end
+
+% ---------- Safe exec ----------
+function ok = try_run_study(model, study_id)
+    ok = true;
+    try, model.study(study_id).run(); catch, ok=false; end
+end
+
+function [ok, D] = try_mpheval(model, exprs, dset)
+    ok = true; D = struct();
+    try
+        D = mpheval(model, exprs,'dataset',dset,'edim','point','selection',2,'solnum','all');
+    catch
+        ok = false;
+    end
+end
+
+function col = toColSafe(data, idx)
+    try, col = data.(['d' num2str(idx)]); catch, col = nan(size(data.d1)); end
+end
