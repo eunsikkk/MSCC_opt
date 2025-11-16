@@ -1,0 +1,325 @@
+% =========================================================================
+% Summary A/B/C plots (no simulation)
+% - A: Charging time / normalized charging time
+% - B: Peak / average temperature summary
+% - C: Min(anode potential) vs protocol & vs charging time
+%
+% 입력:
+%   - run_* 폴더 안의 cccv/mscc*_optimization_log_*.csv
+%   - run_summary_*.mat (최적 C-rate & 최적 t 정보)
+%
+% 출력:
+%   - fig_out_dir 에 PNG 파일로 저장
+% =========================================================================
+clc; clear; close all;
+
+%% 0) 입력/출력 경로 --------------------------------------------------------
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\MSCC_CCCV_opt';
+assert(isfolder(base_dir), '기본 폴더 없음: %s', base_dir);
+
+use_latest = false;
+
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Figure';
+assert(isfolder(fileparts(fig_base_dir)) || isfolder(fig_base_dir), 'Figure 상위 폴더가 유효하지 않습니다.');
+ts = datestr(now,'yyyymmdd_HHMMSS');
+fig_out_dir = fullfile(fig_base_dir, ['summaryABC_' ts]);
+if ~isfolder(fig_out_dir), mkdir(fig_out_dir); end
+
+%% 1) run_* 폴더 선택 -------------------------------------------------------
+if use_latest
+    d = dir(fullfile(base_dir, 'run_*'));
+    assert(~isempty(d), 'run_* 폴더가 없습니다. 먼저 최적화 스크립트를 실행하세요.');
+    [~,ix] = max([d.datenum]);
+    run_dir = fullfile(base_dir, d(ix).name);
+else
+    run_dir = uigetdir(base_dir, '분석할 run_* 폴더를 선택하세요');
+    if isstring(run_dir), run_dir = char(run_dir); end
+    assert(~isequal(run_dir,0), '폴더 선택이 취소되었습니다.');
+    [~,selname] = fileparts(run_dir);
+    assert(startsWith(selname,'run_'), '선택한 폴더명이 run_* 형식이 아닙니다: %s', selname);
+end
+
+fprintf('Using run dir: %s\n', run_dir);
+
+%% 2) 로그 파일 + summary.mat 로드 -----------------------------------------
+cccv_log  = pick_one_file(run_dir, 'cccv_optimization_log_*.csv');
+mscc2_log = pick_one_file(run_dir, 'mscc2_optimization_log_*.csv');
+mscc3_log = pick_one_file(run_dir, 'mscc3_optimization_log_*.csv');
+mscc4_log = pick_one_file(run_dir, 'mscc4_optimization_log_*.csv');
+mscc5_log = pick_one_file(run_dir, 'mscc5_optimization_log_*.csv');
+mscc6_log = pick_one_file(run_dir, 'mscc6_optimization_log_*.csv');
+
+fprintf('  CCCV  log: %s\n',  cccv_log);
+fprintf('  MSCC2 log: %s\n', mscc2_log);
+fprintf('  MSCC3 log: %s\n', mscc3_log);
+fprintf('  MSCC4 log: %s\n', mscc4_log);
+fprintf('  MSCC5 log: %s\n', mscc5_log);
+fprintf('  MSCC6 log: %s\n', mscc6_log);
+
+TC  = readtable(cccv_log);
+TM2 = readtable(mscc2_log);
+TM3 = readtable(mscc3_log);
+TM4 = readtable(mscc4_log);
+TM5 = readtable(mscc5_log);
+TM6 = readtable(mscc6_log);
+
+% summary.mat
+summary_mat = pick_one_file(run_dir, 'run_summary_*.mat');
+S = load(summary_mat);
+
+% --- 최적 C-rate --- (variable 이름은 기존 summary와 동일하다고 가정)
+C_cccv  = S.optimal_C_rate;        % scalar
+C_mscc2 = S.optimal_C_mscc2(:).';  % [C12 C3456]
+C_mscc3 = S.optimal_C_mscc3(:).';  % [C12 C34 C56]
+C_mscc4 = S.optimal_C_mscc4(:).';  % [C1 C2 C34 C56]
+C_mscc5 = S.optimal_C_mscc5(:).';  % [C1 C2 C3 C4 C56]
+C_mscc6 = S.optimal_C_mscc6(:).';  % [C1 C2 C3 C4 C5 C6]
+
+%% 3) 각 프로토콜별 "최적해 row" 찾기 --------------------------------------
+tol = 1e-6;   % C-rate 매칭용 tolerance
+
+% 필요한 컬럼 체크 (공통)
+needCols_common = {'t','T_avg','T_max','Vdiff_min'};
+assert(all(ismember(needCols_common, TC.Properties.VariableNames )), 'CCCV 로그에 필요한 컬럼 없음');
+assert(all(ismember(needCols_common, TM2.Properties.VariableNames)), 'MSCC2 로그에 필요한 컬럼 없음');
+assert(all(ismember(needCols_common, TM3.Properties.VariableNames)), 'MSCC3 로그에 필요한 컬럼 없음');
+assert(all(ismember(needCols_common, TM4.Properties.VariableNames)), 'MSCC4 로그에 필요한 컬럼 없음');
+assert(all(ismember(needCols_common, TM5.Properties.VariableNames)), 'MSCC5 로그에 필요한 컬럼 없음');
+assert(all(ismember(needCols_common, TM6.Properties.VariableNames)), 'MSCC6 로그에 필요한 컬럼 없음');
+
+% 프로토콜 리스트 정의
+PROT = struct('name',{}, 'tbl',{}, 'Ccols',{}, 'Cvals',{}, 'color',{});
+
+blue    = [0,115,194]/255;   % CCCV
+purple  = [128,0,128]/255;   % MSCC2
+green   = [0.20,0.60,0.20];  % MSCC3
+red     = [205,83,76]/255;   % MSCC4
+orange  = [0.93,0.69,0.13];  % MSCC5
+gray    = [0.30,0.30,0.30];  % MSCC6
+
+PROT(end+1) = struct('name','CCCV',  'tbl',TC,  ...
+    'Ccols',{{'C'}},                'Cvals',C_cccv,  'color',blue);
+
+PROT(end+1) = struct('name','MSCC2', 'tbl',TM2, ...
+    'Ccols',{{'C12','C3456'}},      'Cvals',C_mscc2, 'color',purple);
+
+PROT(end+1) = struct('name','MSCC3', 'tbl',TM3, ...
+    'Ccols',{{'C12','C34','C56'}},  'Cvals',C_mscc3, 'color',green);
+
+PROT(end+1) = struct('name','MSCC4', 'tbl',TM4, ...
+    'Ccols',{{'C1','C2','C34','C56'}}, 'Cvals',C_mscc4, 'color',red);
+
+PROT(end+1) = struct('name','MSCC5', 'tbl',TM5, ...
+    'Ccols',{{'C1','C2','C3','C4','C56'}}, 'Cvals',C_mscc5, 'color',orange);
+
+PROT(end+1) = struct('name','MSCC6', 'tbl',TM6, ...
+    'Ccols',{{'C1','C2','C3','C4','C5','C6'}}, 'Cvals',C_mscc6, 'color',gray);
+
+% 각 프로토콜별 요약값 저장용
+nP          = numel(PROT);
+names       = cell(nP,1);
+colors      = zeros(nP,3);
+t_end       = zeros(nP,1);   % [s]
+min_v       = zeros(nP,1);   % [V]
+Tavg_peak   = zeros(nP,1);   % [K]
+Tmax_peak   = zeros(nP,1);   % [K]
+
+for k = 1:nP
+    P   = PROT(k);
+    T   = P.tbl;
+    cols = P.Ccols;
+    Cvals = P.Cvals;
+    idx_opt = find_optimal_row(T, cols, Cvals, tol);
+
+    % 찾은 row에서 값 추출
+    t_end(k)     = T.t(idx_opt);
+    min_v(k)     = T.Vdiff_min(idx_opt);
+    Tavg_peak(k) = T.T_avg(idx_opt);
+    Tmax_peak(k) = T.T_max(idx_opt);
+
+    names{k}  = P.name;
+    colors(k,:) = P.color;
+
+    fprintf('[%s] row %d 사용 (t=%.2f s, Vdiff_min=%.4f V)\n', ...
+        P.name, idx_opt, t_end(k), min_v(k));
+end
+
+%% 4) (B)용 초기 온도 및 ΔT 계산 -------------------------------------------
+% 초기 온도: CCCV의 T_avg를 첫번째 row에서 가져와도 되고,
+%            단순히 298.15 K (25°C)로 고정해도 됨.
+% 여기서는 CCCV 로그의 첫 row 기준으로 사용.
+T_init = TC.T_avg(1);   % [K]
+
+dT_avg     = Tavg_peak - T_init;    % [K] ≒ [°C] 상승량
+Tmax_peakC = Tmax_peak - 273.15;    % [°C]
+
+%% 5) (A) Charging time / normalized charging time -------------------------
+
+% (A1) 절대 충전시간
+fA1 = figure(5101); clf; set(gcf,'Color','w');
+b1 = bar(t_end);
+b1.FaceColor = 'flat';
+for k = 1:nP
+    b1.CData(k,:) = colors(k,:);
+end
+grid on;
+
+xticks(1:nP);
+xticklabels(names);
+xlabel('Protocol');
+ylabel('t_{end} (s)');
+title('Charging time per protocol (Optimal C)');
+set(gca,'FontSize',11);
+
+outA1 = fullfile(fig_out_dir, 'A1_charging_time_abs.png');
+export_png(fA1, outA1);
+fprintf('Saved: %s\n', outA1);
+
+% (A2) 정규화 충전시간 (CCCV 기준)
+t_norm = t_end / t_end(1);   % CCCV = index 1 이라는 가정
+
+fA2 = figure(5102); clf; set(gcf,'Color','w');
+b2 = bar(t_norm);
+b2.FaceColor = 'flat';
+for k = 1:nP
+    b2.CData(k,:) = colors(k,:);
+end
+grid on;
+
+xticks(1:nP);
+xticklabels(names);
+xlabel('Protocol');
+ylabel('t_{end} / t_{end,CCCV}');
+title('Normalized charging time (w.r.t. CCCV)');
+set(gca,'FontSize',11);
+
+hold on;
+plot(xlim, [1 1], 'k--', 'LineWidth',1.0);  % 기준선
+hold off;
+
+outA2 = fullfile(fig_out_dir, 'A2_charging_time_normalized.png');
+export_png(fA2, outA2);
+fprintf('Saved: %s\n', outA2);
+
+%% 6) (B) Peak / average temperature plots --------------------------------
+
+% (B1) ΔT_avg
+fB1 = figure(5201); clf; set(gcf,'Color','w');
+b3 = bar(dT_avg);
+b3.FaceColor = 'flat';
+for k = 1:nP
+    b3.CData(k,:) = colors(k,:);
+end
+grid on;
+
+xticks(1:nP);
+xticklabels(names);
+xlabel('Protocol');
+ylabel('\DeltaT_{avg} (°C)');
+title('\DeltaT_{avg} per protocol (Optimal C)');
+set(gca,'FontSize',11);
+
+outB1 = fullfile(fig_out_dir, 'B1_deltaTavg.png');
+export_png(fB1, outB1);
+fprintf('Saved: %s\n', outB1);
+
+% (B2) Tmax_peak [°C]
+fB2 = figure(5202); clf; set(gcf,'Color','w');
+b4 = bar(Tmax_peakC);
+b4.FaceColor = 'flat';
+for k = 1:nP
+    b4.CData(k,:) = colors(k,:);
+end
+grid on;
+
+xticks(1:nP);
+xticklabels(names);
+xlabel('Protocol');
+ylabel('T_{max,peak} (°C)');
+title('Peak maximum temperature per protocol (Optimal C)');
+set(gca,'FontSize',11);
+
+outB2 = fullfile(fig_out_dir, 'B2_Tmax_peak.png');
+export_png(fB2, outB2);
+fprintf('Saved: %s\n', outB2);
+
+%% 7) (C) min(anode potential) 요약 ----------------------------------------
+
+% (C1) protocol vs min_v (bar)
+fC1 = figure(5301); clf; set(gcf,'Color','w');
+b5 = bar(min_v);
+b5.FaceColor = 'flat';
+for k = 1:nP
+    b5.CData(k,:) = colors(k,:);
+end
+grid on;
+
+xticks(1:nP);
+xticklabels(names);
+xlabel('Protocol');
+ylabel('min(anode potential) (V)');
+title('Minimum anode potential per protocol (Optimal C)');
+set(gca,'FontSize',11);
+
+outC1 = fullfile(fig_out_dir, 'C1_min_anode_potential_bar.png');
+export_png(fC1, outC1);
+fprintf('Saved: %s\n', outC1);
+
+% (C2) t_end vs min_v (scatter, trade-off)
+fC2 = figure(5302); clf; set(gcf,'Color','w'); hold on; grid on;
+
+for k = 1:nP
+    scatter(t_end(k), min_v(k), 60, colors(k,:), 'filled');
+    text(t_end(k), min_v(k), ['  ' names{k}], ...
+        'FontSize',10, 'Color',[0 0 0], 'VerticalAlignment','middle');
+end
+
+xlabel('t_{end} (s)');
+ylabel('min(anode potential) (V)');
+title('Trade-off: Charging time vs min(anode potential)');
+set(gca,'FontSize',11);
+
+outC2 = fullfile(fig_out_dir, 'C2_tend_vs_min_anode_potential.png');
+export_png(fC2, outC2);
+fprintf('Saved: %s\n', outC2);
+
+fprintf('\n=== Summary A/B/C plots are saved in: %s ===\n', fig_out_dir);
+
+%% ======================= Local helper functions ==========================
+function fpath = pick_one_file(folder, pattern)
+    L = dir(fullfile(folder, pattern));
+    assert(~isempty(L), '파일이 없습니다: %s', fullfile(folder, pattern));
+    [~,ix] = max([L.datenum]);           % 가장 최신 파일
+    fpath = fullfile(L(ix).folder, L(ix).name);
+end
+
+function idx = find_optimal_row(T, Ccols, Cvals, tol)
+    % Ccols: cell-array of column names
+    % Cvals: row vector of target C-rate values
+    assert(numel(Ccols) == numel(Cvals), 'Ccols / Cvals 길이 불일치');
+
+    idx_mask = true(height(T),1);
+    for i = 1:numel(Ccols)
+        colname = Ccols{i};
+        assert(ismember(colname, T.Properties.VariableNames), ...
+            '컬럼 없음: %s', colname);
+        v = T.(colname);
+        idx_mask = idx_mask & abs(v - Cvals(i)) < tol;
+    end
+    idx_list = find(idx_mask);
+    assert(~isempty(idx_list), '최적 C-rate에 해당하는 row를 찾지 못했습니다.');
+    idx = idx_list(1);    % 여러 개면 첫 번째 사용
+end
+
+function export_png(fig_handle, outpath)
+    try
+        set(fig_handle, 'Color','w');
+        axs = findall(fig_handle, 'Type', 'axes');
+        for ax = axs'
+            try, axtoolbar(ax,'Visible','off'); end %#ok<TRYNC>
+        end
+        exportgraphics(fig_handle, outpath, 'Resolution', 220);
+    catch ME
+        warning('PNG 저장 실패 (%s): %s', outpath, ME.message);
+    end
+end
