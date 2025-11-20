@@ -33,14 +33,14 @@ import com.comsol.model.*
 import com.comsol.model.util.*
 
 %% 0) 출력 경로 -------------------------------------------------------------
-fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Figure';
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
 assert(isfolder(fileparts(fig_base_dir)) || isfolder(fig_base_dir), 'Figure 상위 폴더가 유효하지 않습니다.');
 ts = datestr(now,'yyyymmdd_HHMMSS');
 out_dir = fullfile(fig_base_dir, ['pulse_grid_MSCC4_' ts]);
 if ~isfolder(out_dir), mkdir(out_dir); end
 
 %% 1) 모델 로드 --------------------------------------------------------------
-filepath = 'C:\Users\user\Downloads';
+filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
 filename = 'ES_MSCCPC_Final_1119_pulse.mph';  % std3/dset37 포함 모델
 full_path = fullfile(filepath, filename);
 assert(isfile(full_path),'mph 파일 없음: %s', full_path);
@@ -121,7 +121,7 @@ fprintf('Baseline MSCC4: T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, platin
 %% 4) Pulse Grid 설정 --------------------------------------------------------
 stage_modes = 1:7;          % pulse_stage_mode: 1~7
 Irest_list = [1, 0, -1];    % I_rest: 1C, 0C, -1C
-duty_list  = linspace(0.5, 0.99, 10);
+duty_list  = linspace(0.5, 0.95, 10);
 Tper_list  = logspace(0, 2, 10);      % 1~100 s
 
 N_total = numel(stage_modes) * numel(Irest_list) * numel(duty_list) * numel(Tper_list);
