@@ -2,7 +2,7 @@
 % COMSOL-MATLAB: MSCC4 + Pulse Grid Search (C-rate는 모델에서 직접 읽기)
 %
 %  - C-rate:
-%    · COMSOL 파라미터 탭(first_MSCC_Crate ~ sixth_MSCC_Crate)에 보이는 값 사용
+%    · COMSOL 모델 파라미터 first_MSCC_Crate ~ sixth_MSCC_Crate 에서 읽어서 사용
 %
 %  - Baseline:
 %    · pulse_stage_mode = 0 (펄스 OFF) 상태에서 MSCC4 1회 시뮬
@@ -26,7 +26,9 @@
 %    · 충전시간 T, min(liion.Ect)=s, T_avg, T_max, plating_cap_end 계산
 %    · baseline 대비 d_plating = plating_cap_end - plating_cap_MSCC4_base 저장
 %
-%  - study/dataset: std3 / dset37 (모델 내부 설정과 일치해야 함)
+%  - study/dataset:
+%    · Baseline (no pulse): std2 / dset3
+%    · Pulse grid:          std3 / dset37
 % =========================================================================
 clc; clear; close all;
 import com.comsol.model.*
@@ -49,22 +51,21 @@ model = mphload(full_path);
 ModelUtil.showProgress(true);
 disp('모델 불러오기 완료.');
 
-%% 2) MSCC4 C-rate: GUI Parameter 값(param.get)에서 읽기 --------------------
-%  - COMSOL Parameter 탭에 보이는 first~sixth_MSCC_Crate 값을 그대로 사용
-%  - (mphglobal이 아니라 param.get → str2double 기반)
-% =========================================================================
-C1_4 = str2double(model.param.get('first_MSCC_Crate'));
-C2_4 = str2double(model.param.get('second_MSCC_Crate'));
-C3_4 = str2double(model.param.get('third_MSCC_Crate'));
-C4_4 = str2double(model.param.get('fourth_MSCC_Crate'));
-C5_4 = str2double(model.param.get('fifth_MSCC_Crate'));
-C6_4 = str2double(model.param.get('sixth_MSCC_Crate'));
+%% 2) MSCC4 C-rate: COMSOL 모델 파라미터에서 읽기 ---------------------------
+% COMSOL 모델 파라미터:
+%   first_MSCC_Crate, second_MSCC_Crate, ..., sixth_MSCC_Crate
+C1_4 = mphglobal(model, 'first_MSCC_Crate');   C1_4 = C1_4(1);
+C2_4 = mphglobal(model, 'second_MSCC_Crate');  C2_4 = C2_4(1);
+C3_4 = mphglobal(model, 'third_MSCC_Crate');   C3_4 = C3_4(1);
+C4_4 = mphglobal(model, 'fourth_MSCC_Crate');  C4_4 = C4_4(1);
+C5_4 = mphglobal(model, 'fifth_MSCC_Crate');   C5_4 = C5_4(1);
+C6_4 = mphglobal(model, 'sixth_MSCC_Crate');   C6_4 = C6_4(1);
 
 Cvec_mscc4 = [C1_4, C2_4, C3_4, C4_4, C5_4, C6_4];   % 1x6 row
 
-fprintf('MSCC4 C-rate from PARAM table = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
+fprintf('MSCC4 C-rate from model = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
 
-% (선택) 다시 COMSOL 파라미터에 set (실제로는 동일 값이라 no-op이지만, 명시적으로 맞춰둠)
+% 확실히 맞게 COMSOL 파라미터에 다시 세팅 (덮어쓰기)
 model.param.set('first_MSCC_Crate',  num2str(Cvec_mscc4(1)));
 model.param.set('second_MSCC_Crate', num2str(Cvec_mscc4(2)));
 model.param.set('third_MSCC_Crate',  num2str(Cvec_mscc4(3)));
@@ -72,50 +73,52 @@ model.param.set('fourth_MSCC_Crate', num2str(Cvec_mscc4(4)));
 model.param.set('fifth_MSCC_Crate',  num2str(Cvec_mscc4(5)));
 model.param.set('sixth_MSCC_Crate',  num2str(Cvec_mscc4(6)));
 
-%% 3) Baseline MSCC4 (no pulse) 결과만 COMSOL에서 읽기 -----------------------
-%  - 해는 이미 모델 안에 계산/저장되어 있다고 가정 (std3 다시 안 돌림)
-%  - dataset: dset37 에서 t, Ect, CC/CV flag, T_avg, T_max, plating_cap 읽기
+%% 3) Baseline MSCC4 (펄스 OFF) 시뮬레이션 -----------------------------------
+% pulse_stage_mode = 0 → 펄스 완전 OFF
+disp('===== Baseline MSCC4 (no pulse) 시뮬레이션 시작 =====');
 
-disp('===== Baseline MSCC4 (no pulse) 결과 읽기 (재계산 없음) =====');
+model.param.set('pulse_stage_mode',                 '0');
+model.param.set('pulse_rest_current_param_coeffi',  '0');
+model.param.set('duty_cycle', '0.5');   % mode=0이면 실제 pulse에는 안 쓰인다고 가정
+model.param.set('pulse_freq', '1[s]');
 
-% --- (1) t, liion.Ect, CC/CV flag 읽기 ------------------------------------
+ok_base = try_run_study(model, 'std2');
+if ~ok_base
+    error('Baseline MSCC4 (no pulse) std2 실행 실패');
+end
+
+% baseline에서 t, liion.Ect, CC/CV flag, plating_cap, T_avg, T_max 평가
 expr = {'t','liion.Ect','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
-[ok_eval_base, Dbase] = try_mpheval(model, expr, 'dset37');
+[ok_eval_base, Dbase] = try_mpheval(model, expr, 'dset3');
 if ~ok_eval_base
-    error(['기존 dset37에서 baseline 결과를 읽을 수 없습니다.\n' ...
-           '먼저 MSCC4 (pulse OFF) 해를 std3/dset37에 계산해 두고 mph를 저장해야 합니다.']);
+    error('Baseline mpheval 실패');
 end
 
 t_base    = Dbase.d1;
 over_base = Dbase.d2;
 cc_base   = Dbase.d3;
 cv_base   = Dbase.d4;
-
 idx_base  = (cc_base==1)|(cv_base==1);
-assert(any(idx_base), 'Baseline(dset37)에서 CC/CV 구간이 없습니다.');
+assert(any(idx_base), 'Baseline에서 CC/CV 구간이 없습니다.');
 
 Tmin_base    = min(over_base(idx_base));
 Tcharge_base = t_base(find(idx_base,1,'last'));
+[Tavg_base, Tmax_base] = get_T_peaks(model, 'dset3');
 
-% --- (2) T_avg, T_max 피크 읽기 --------------------------------------------
-[Tavg_base, Tmax_base] = get_T_peaks(model, 'dset37');
-
-% --- (3) 이미 계산되어 있는 plating_cap 읽기 ------------------------------
 plating_cap_MSCC4_base = NaN;
 try
     Gp_base = mpheval(model, 'plating_cap', ...
-                      'dataset',  'dset37', ...
+                      'dataset',  'dset3', ...
                       'edim',     'point', ...
                       'selection', 2, ...
                       'solnum',   'all');
     plating_cap_MSCC4_base = Gp_base.d1(end);
 catch
-    warning('Baseline plating_cap(mpheval) 평가 실패 → NaN');
+    warning('Baseline plating_cap 평가 실패 → NaN');
 end
 
-fprintf('Baseline MSCC4 (from dset37): T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, plating_cap=%.4g\n', ...
+fprintf('Baseline MSCC4: T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, plating_cap=%.4g\n', ...
     Tcharge_base, Tmin_base, Tavg_base, Tmax_base, plating_cap_MSCC4_base);
-
 
 %% 4) Pulse Grid 설정 --------------------------------------------------------
 stage_modes = 1:7;          % pulse_stage_mode: 1~7
@@ -139,7 +142,7 @@ init_csv(fn_mscc4_grid, header_cols);
 %% 5) Baseline도 CSV에 한 줄 기록 (stage_mode = 0) -------------------------
 row0 = [ ...
     0, ...                           % stage_mode (0 = no pulse)
-    Cvec_mscc4(:).', ...             % C1..C6 (row 강제) ← GUI 값 그대로
+    Cvec_mscc4(:).', ...             % C1..C6 (row 강제)
     0, 0.5, 1, ...                   % I_rest, duty, Tper (형식 맞추기용 값)
     Tcharge_base, Tmin_base, Tavg_base, Tmax_base, ...
     plating_cap_MSCC4_base, ...
