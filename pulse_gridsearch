@@ -2,7 +2,7 @@
 % COMSOL-MATLAB: MSCC4 + Pulse Grid Search (C-rate는 모델에서 직접 읽기)
 %
 %  - C-rate:
-%    · COMSOL 모델 파라미터 first_MSCC_Crate ~ sixth_MSCC_Crate 에서 읽어서 사용
+%    · COMSOL 파라미터 탭(first_MSCC_Crate ~ sixth_MSCC_Crate)에 보이는 값 사용
 %
 %  - Baseline:
 %    · pulse_stage_mode = 0 (펄스 OFF) 상태에서 MSCC4 1회 시뮬
@@ -41,7 +41,7 @@ if ~isfolder(out_dir), mkdir(out_dir); end
 
 %% 1) 모델 로드 --------------------------------------------------------------
 filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
-filename = 'ES_MSCCPC_Final_1119_pulse.mph';  % std3/dset37 포함 모델
+filename = 'ES_MSCCPC_Final.mph';  % std3/dset37 포함 모델
 full_path = fullfile(filepath, filename);
 assert(isfile(full_path),'mph 파일 없음: %s', full_path);
 
@@ -49,21 +49,22 @@ model = mphload(full_path);
 ModelUtil.showProgress(true);
 disp('모델 불러오기 완료.');
 
-%% 2) MSCC4 C-rate: COMSOL 모델 파라미터에서 읽기 ---------------------------
-% COMSOL 모델 파라미터:
-%   first_MSCC_Crate, second_MSCC_Crate, ..., sixth_MSCC_Crate
-C1_4 = mphglobal(model, 'first_MSCC_Crate');   C1_4 = C1_4(1);
-C2_4 = mphglobal(model, 'second_MSCC_Crate');  C2_4 = C2_4(1);
-C3_4 = mphglobal(model, 'third_MSCC_Crate');   C3_4 = C3_4(1);
-C4_4 = mphglobal(model, 'fourth_MSCC_Crate');  C4_4 = C4_4(1);
-C5_4 = mphglobal(model, 'fifth_MSCC_Crate');   C5_4 = C5_4(1);
-C6_4 = mphglobal(model, 'sixth_MSCC_Crate');   C6_4 = C6_4(1);
+%% 2) MSCC4 C-rate: GUI Parameter 값(param.get)에서 읽기 --------------------
+%  - COMSOL Parameter 탭에 보이는 first~sixth_MSCC_Crate 값을 그대로 사용
+%  - (mphglobal이 아니라 param.get → str2double 기반)
+% =========================================================================
+C1_4 = str2double(model.param.get('first_MSCC_Crate'));
+C2_4 = str2double(model.param.get('second_MSCC_Crate'));
+C3_4 = str2double(model.param.get('third_MSCC_Crate'));
+C4_4 = str2double(model.param.get('fourth_MSCC_Crate'));
+C5_4 = str2double(model.param.get('fifth_MSCC_Crate'));
+C6_4 = str2double(model.param.get('sixth_MSCC_Crate'));
 
 Cvec_mscc4 = [C1_4, C2_4, C3_4, C4_4, C5_4, C6_4];   % 1x6 row
 
-fprintf('MSCC4 C-rate from model = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
+fprintf('MSCC4 C-rate from PARAM table = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
 
-% 확실히 맞게 COMSOL 파라미터에 다시 세팅 (덮어쓰기)
+% (선택) 다시 COMSOL 파라미터에 set (실제로는 동일 값이라 no-op이지만, 명시적으로 맞춰둠)
 model.param.set('first_MSCC_Crate',  num2str(Cvec_mscc4(1)));
 model.param.set('second_MSCC_Crate', num2str(Cvec_mscc4(2)));
 model.param.set('third_MSCC_Crate',  num2str(Cvec_mscc4(3)));
@@ -140,7 +141,7 @@ init_csv(fn_mscc4_grid, header_cols);
 %% 5) Baseline도 CSV에 한 줄 기록 (stage_mode = 0) -------------------------
 row0 = [ ...
     0, ...                           % stage_mode (0 = no pulse)
-    Cvec_mscc4(:).', ...             % C1..C6 (row 강제)
+    Cvec_mscc4(:).', ...             % C1..C6 (row 강제) ← GUI 값 그대로
     0, 0.5, 1, ...                   % I_rest, duty, Tper (형식 맞추기용 값)
     Tcharge_base, Tmin_base, Tavg_base, Tmax_base, ...
     plating_cap_MSCC4_base, ...
