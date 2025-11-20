@@ -51,27 +51,45 @@ model = mphload(full_path);
 ModelUtil.showProgress(true);
 disp('모델 불러오기 완료.');
 
-%% 2) MSCC4 C-rate: COMSOL 모델 파라미터에서 읽기 ---------------------------
-% COMSOL 모델 파라미터:
-%   first_MSCC_Crate, second_MSCC_Crate, ..., sixth_MSCC_Crate
-C1_4 = mphglobal(model, 'first_MSCC_Crate');   C1_4 = C1_4(1);
-C2_4 = mphglobal(model, 'second_MSCC_Crate');  C2_4 = C2_4(1);
-C3_4 = mphglobal(model, 'third_MSCC_Crate');   C3_4 = C3_4(1);
-C4_4 = mphglobal(model, 'fourth_MSCC_Crate');  C4_4 = C4_4(1);
-C5_4 = mphglobal(model, 'fifth_MSCC_Crate');   C5_4 = C5_4(1);
-C6_4 = mphglobal(model, 'sixth_MSCC_Crate');   C6_4 = C6_4(1);
+%% 2) MSCC4 C-rate: Summary (run_summary_*.mat)에서 읽기 ---------------------
+%  - unified optimization 코드에서 저장한 run_summary_*.mat 사용
+%  - 기대 변수: optimal_C_mscc4 = [C1 C2 C34 C56]
+%  - MSCC4 매핑: first=C1, second=C2, third=fourth=C34, fifth=sixth=C56
+
+summary_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\MSCC_CCCV_opt';
+assert(isfolder(summary_base_dir), 'summary 기본 폴더가 없습니다: %s', summary_base_dir);
+
+% run_*/run_summary_*.mat 중에서 하나 선택 (최적 C-rate가 들어있는 run)
+[fn_sum, fp_sum] = uigetfile( ...
+    fullfile(summary_base_dir, 'run_*', 'run_summary_*.mat'), ...
+    'MSCC4 최적화 run_summary_*.mat 파일을 선택하세요');
+
+if isequal(fn_sum,0)
+    error('run_summary 선택이 취소되었습니다.');
+end
+
+fullpath_sum = fullfile(fp_sum, fn_sum);
+S = load(fullpath_sum);
+
+if ~isfield(S, 'optimal_C_mscc4')
+    error('선택한 run_summary 파일에 optimal_C_mscc4 변수가 없습니다.');
+end
+
+% optimal_C_mscc4 = [C1 C2 C34 C56] 가정
+C1_4 = S.optimal_C_mscc4(1);
+C2_4 = S.optimal_C_mscc4(2);
+C34  = S.optimal_C_mscc4(3);
+C56  = S.optimal_C_mscc4(4);
+
+% 6 stage로 펼치기
+C3_4 = C34;
+C4_4 = C34;
+C5_4 = C56;
+C6_4 = C56;
 
 Cvec_mscc4 = [C1_4, C2_4, C3_4, C4_4, C5_4, C6_4];   % 1x6 row
 
-fprintf('MSCC4 C-rate from model = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
-
-% 확실히 맞게 COMSOL 파라미터에 다시 세팅 (덮어쓰기)
-model.param.set('first_MSCC_Crate',  num2str(Cvec_mscc4(1)));
-model.param.set('second_MSCC_Crate', num2str(Cvec_mscc4(2)));
-model.param.set('third_MSCC_Crate',  num2str(Cvec_mscc4(3)));
-model.param.set('fourth_MSCC_Crate', num2str(Cvec_mscc4(4)));
-model.param.set('fifth_MSCC_Crate',  num2str(Cvec_mscc4(5)));
-model.param.set('sixth_MSCC_Crate',  num2str(Cvec_mscc4(6)));
+fprintf('MSCC4 C-rate from summary = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
 
 %% 3) Baseline MSCC4 (펄스 OFF) 시뮬레이션 -----------------------------------
 % pulse_stage_mode = 0 → 펄스 완전 OFF
