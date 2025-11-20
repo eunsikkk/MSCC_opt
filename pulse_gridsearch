@@ -72,28 +72,50 @@ model.param.set('fourth_MSCC_Crate', num2str(Cvec_mscc4(4)));
 model.param.set('fifth_MSCC_Crate',  num2str(Cvec_mscc4(5)));
 model.param.set('sixth_MSCC_Crate',  num2str(Cvec_mscc4(6)));
 
-%% 3) Baseline MSCC4 결과 로드 (이미 계산된 값 사용) ------------------------
-% 예: 예전에 돌린 run_summary_*.mat 이나 baseline용 MAT에서 불러옴
+%% 3) Baseline MSCC4 (no pulse) 결과만 COMSOL에서 읽기 -----------------------
+%  - 해는 이미 모델 안에 계산/저장되어 있다고 가정 (std3 다시 안 돌림)
+%  - dataset: dset37 에서 t, Ect, CC/CV flag, T_avg, T_max, plating_cap 읽기
 
-[mat_file, mat_path] = uigetfile('*.mat', ...
-    'Baseline MSCC4 결과가 들어있는 MAT 파일을 선택하세요');
-assert(mat_file ~= 0, 'Baseline MAT 선택이 취소되었습니다.');
+disp('===== Baseline MSCC4 (no pulse) 결과 읽기 (재계산 없음) =====');
 
-Sbase = load(fullfile(mat_path, mat_file));
+% --- (1) t, liion.Ect, CC/CV flag 읽기 ------------------------------------
+expr = {'t','liion.Ect','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+[ok_eval_base, Dbase] = try_mpheval(model, expr, 'dset37');
+if ~ok_eval_base
+    error(['기존 dset37에서 baseline 결과를 읽을 수 없습니다.\n' ...
+           '먼저 MSCC4 (pulse OFF) 해를 std3/dset37에 계산해 두고 mph를 저장해야 합니다.']);
+end
 
-% === 여기부터는 네 run_summary / MAT 구조에 맞게 변수명만 맞춰줘야 함 ===
-% 예시: run_summary_*.mat 에 이런 필드가 있다고 가정한 코드야.
-%       (실제 필드명에 맞게 고쳐 쓰면 됨)
+t_base    = Dbase.d1;
+over_base = Dbase.d2;
+cc_base   = Dbase.d3;
+cv_base   = Dbase.d4;
 
-Tcharge_base = Sbase.mscc4_min_t;            % MSCC4 최적 충전시간 [s]
-Tmin_base    = Sbase.mscc4_min_s;            % min(liion.Ect)
-Tavg_base    = Sbase.mscc4_min_T_avg;        % 전체 사이클 T_avg 피크 or 평균
-Tmax_base    = Sbase.mscc4_min_T_max;        % 전체 사이클 T_max 피크
-plating_cap_MSCC4_base = Sbase.mscc4_plating_cap_end;  % ★ 이미 계산된 baseline plating_cap
+idx_base  = (cc_base==1)|(cv_base==1);
+assert(any(idx_base), 'Baseline(dset37)에서 CC/CV 구간이 없습니다.');
 
-fprintf('Loaded baseline MSCC4 from MAT:\n');
-fprintf('  T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, plating_cap=%.4g\n', ...
+Tmin_base    = min(over_base(idx_base));
+Tcharge_base = t_base(find(idx_base,1,'last'));
+
+% --- (2) T_avg, T_max 피크 읽기 --------------------------------------------
+[Tavg_base, Tmax_base] = get_T_peaks(model, 'dset37');
+
+% --- (3) 이미 계산되어 있는 plating_cap 읽기 ------------------------------
+plating_cap_MSCC4_base = NaN;
+try
+    Gp_base = mpheval(model, 'plating_cap', ...
+                      'dataset',  'dset37', ...
+                      'edim',     'point', ...
+                      'selection', 2, ...
+                      'solnum',   'all');
+    plating_cap_MSCC4_base = Gp_base.d1(end);
+catch
+    warning('Baseline plating_cap(mpheval) 평가 실패 → NaN');
+end
+
+fprintf('Baseline MSCC4 (from dset37): T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, plating_cap=%.4g\n', ...
     Tcharge_base, Tmin_base, Tavg_base, Tmax_base, plating_cap_MSCC4_base);
+
 
 %% 4) Pulse Grid 설정 --------------------------------------------------------
 stage_modes = 1:7;          % pulse_stage_mode: 1~7
