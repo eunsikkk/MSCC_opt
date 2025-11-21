@@ -1,0 +1,291 @@
+% =========================================================================
+% COMSOL-MATLAB: MSCC4 + Pulse Grid Search (RESUME from existing CSV)
+%
+%  - 기존에 돌리던 mscc4_pulse_grid_*.csv 를 선택해서
+%    이미 계산된 조합은 건너뛰고, 나머지만 이어서 시뮬레이션
+%
+%  - 전제:
+%    · CSV 구조는 기존 스크립트와 동일
+%    · 1행: baseline (stage_mode = 0)
+%    · 2행 이후: stage_mode=1~7, I_rest, duty, pulse_period_s 조합 순서대로
+% =========================================================================
+clc; clear; close all;
+import com.comsol.model.*
+import com.comsol.model.util.*
+
+%% 0) 이어서 돌릴 CSV 선택 ---------------------------------------------------
+pulse_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
+assert(isfolder(pulse_dir), 'Pulse_opt 폴더가 없습니다: %s', pulse_dir);
+
+[fn_csv, fp_csv] = uigetfile(fullfile(pulse_dir, 'pulse_grid_MSCC4_*', 'mscc4_pulse_grid_*.csv'), ...
+    '이어 돌릴 mscc4_pulse_grid_*.csv 를 선택하세요');
+if isequal(fn_csv, 0)
+    error('CSV 파일 선택이 취소되었습니다.');
+end
+
+csv_path = fullfile(fp_csv, fn_csv);
+fprintf('이어 돌릴 CSV: %s\n', csv_path);
+
+% === CSV 읽기 ===
+T = readtable(csv_path);
+n_rows = height(T);
+if n_rows < 2
+    error('CSV에 baseline 및 grid 데이터가 충분히 없습니다 (행 수 = %d).', n_rows);
+end
+
+% 1행은 baseline, 2행 이후가 grid 조합
+done_count = n_rows - 1;   % 이미 계산 완료된 grid 개수
+fprintf('이미 완료된 grid 개수: %d\n', done_count);
+
+% baseline 정보는 1행에서 읽어옴
+Cvec_mscc4 = [T.C1(1), T.C2(1), T.C3(1), T.C4(1), T.C5(1), T.C6(1)];
+plating_cap_MSCC4_base = T.plating_cap_base(1);
+
+fprintf('Baseline C-rate from CSV = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
+fprintf('Baseline plating_cap_MSCC4_base = %.12g\n', plating_cap_MSCC4_base);
+
+%% 1) 모델 로드 --------------------------------------------------------------
+% (기존과 동일한 mph 모델 사용)
+filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
+filename = 'ES_MSCCPC_Final.mph';  % std3/dset37 포함 모델
+full_path = fullfile(filepath, filename);
+assert(isfile(full_path),'mph 파일 없음: %s', full_path);
+
+model = mphload(full_path);
+ModelUtil.showProgress(true);
+disp('모델 불러오기 완료 (resume 모드).');
+
+%% 2) Pulse Grid 설정 (기존 스크립트와 동일하게) ---------------------------
+stage_modes = 1:7;          % pulse_stage_mode: 1~7
+Irest_list  = [1, 0, -1];   % I_rest: 1C, 0C, -1C
+duty_list   = linspace(0.5, 0.95, 10);
+Tper_list   = logspace(0, 2, 10);      % 1~100 s
+
+N_total = numel(stage_modes) * numel(Irest_list) * numel(duty_list) * numel(Tper_list);
+fprintf('총 grid 개수(이론): %d\n', N_total);
+
+if done_count > N_total
+    warning('CSV에 있는 grid 개수(%d)가 설정된 N_total(%d)보다 많습니다. 설정을 확인하세요.', ...
+        done_count, N_total);
+end
+
+if done_count == N_total
+    fprintf('이미 모든 grid가 완료된 CSV입니다. 추가로 돌릴 것이 없습니다.\n');
+    return;
+end
+
+% CSV는 이미 존재하므로 init_csv / baseline 기록은 안 함
+fn_mscc4_grid = csv_path;
+
+%% 3) Grid Search 루프 (이어서) ----------------------------------------------
+cnt = 0;   % 전체 grid index (1-based, 기존 코드와 동일)
+
+tic;
+for im = 1:numel(stage_modes)
+    stage_mode = stage_modes(im);
+    fprintf('\n===== pulse_stage_mode = %d 진행 중 =====\n', stage_mode);
+
+    for ir = 1:numel(Irest_list)
+        Irest = Irest_list(ir);
+
+        for id = 1:numel(duty_list)
+            duty = duty_list(id);
+
+            for ip = 1:numel(Tper_list)
+                Tper = Tper_list(ip);
+
+                cnt = cnt + 1;   % 이 조합의 글로벌 인덱스 (1~N_total)
+
+                % --- 이미 끝난 조합은 건너뛰기 --------------------------------
+                if cnt <= done_count
+                    % fprintf('[%4d/%4d] 이미 완료된 조합, 건너뜀.\n', cnt, N_total);
+                    continue;
+                end
+
+                fprintf('\n[RESUME %4d / %4d] mode=%d, Irest=%.1f, duty=%.3f, Tper=%.2f s\n', ...
+                        cnt, N_total, stage_mode, Irest, duty, Tper);
+
+                eval_PULSE_GRID_MSCC4(model, ...
+                    Cvec_mscc4, stage_mode, Irest, duty, Tper, ...
+                    plating_cap_MSCC4_base, fn_mscc4_grid);
+            end
+        end
+    end
+end
+toc;
+
+fprintf('\nRESUME 완료. CSV 계속 사용: %s\n', fn_mscc4_grid);
+
+% ======================= Local helper functions ==========================
+
+function append_grid_row(fn, row)
+    % 안전하게 row vector로 변환
+    row = row(:).';  % (N,1) -> (1,N)
+
+    % row = [stage_mode, C1..C6, I_rest, duty, Tper, T, s, T_avg, T_max,
+    %        plating_cap, plating_cap_base, d_plating]
+    T = table( ...
+        row(1), ...   % stage_mode
+        row(2), row(3), row(4), row(5), row(6), row(7), ...   % C1..C6
+        row(8), ...   % I_rest
+        row(9), ...   % duty
+        row(10), ...  % pulse_period_s
+        row(11), ...  % T
+        row(12), ...  % s (min liion.Ect)
+        row(13), ...  % T_avg
+        row(14), ...  % T_max
+        row(15), ...  % plating_cap
+        row(16), ...  % plating_cap_base
+        row(17), ...  % d_plating
+        'VariableNames', {'stage_mode', ...
+                          'C1','C2','C3','C4','C5','C6', ...
+                          'I_rest','duty','pulse_period_s', ...
+                          'T','s','T_avg','T_max','plating_cap', ...
+                          'plating_cap_base','d_plating'});
+    writetable(T, fn, 'WriteMode','Append');
+end
+
+% --------- Grid용 Pulse 평가 함수 (MSCC4, C-rate 고정) --------------------
+function eval_PULSE_GRID_MSCC4(model, Cvec6, stage_mode, Irest, duty, Tper, ...
+                               plating_cap_base, fn_csv)
+
+    % Cvec6는 이미 1x6 row 이지만, 혹시 모를 상황 대비해서 스칼라로 캐스팅
+    C1 = Cvec6(1); C2 = Cvec6(2); C3 = Cvec6(3);
+    C4 = Cvec6(4); C5 = Cvec6(5); C6 = Cvec6(6);
+
+    persistent fcnt;
+    if isempty(fcnt), fcnt = 0; end
+    fcnt = fcnt + 1;
+
+    fprintf('[F%04d] C=[%.3f %.3f %.3f %.3f %.3f %.3f], ', ...
+        fcnt, C1, C2, C3, C4, C5, C6);
+    fprintf('mode=%d, duty=%.3f, Irest=%.3f, Tper=%.2f (%s)\n', ...
+        stage_mode, duty, Irest, Tper, datestr(now,'HH:MM:SS.FFF'));
+
+    % --- COMSOL 파라미터 세팅 ----------------------------------------------
+    try
+        model.param.set('first_MSCC_Crate',  num2str(C1));
+        model.param.set('second_MSCC_Crate', num2str(C2));
+        model.param.set('third_MSCC_Crate',  num2str(C3));
+        model.param.set('fourth_MSCC_Crate', num2str(C4));
+        model.param.set('fifth_MSCC_Crate',  num2str(C5));
+        model.param.set('sixth_MSCC_Crate',  num2str(C6));
+
+        model.param.set('pulse_stage_mode',                num2str(stage_mode));
+        model.param.set('pulse_rest_current_param_coeffi', num2str(Irest));
+        model.param.set('pulse_freq', [num2str(Tper) '[s]']);
+        model.param.set('duty_cycle', num2str(duty));
+    catch ME
+        warning('파라미터 세팅 실패: %s', ME.message);
+        row = [stage_mode, C1, C2, C3, C4, C5, C6, ...
+               Irest, duty, Tper, ...
+               NaN, NaN, NaN, NaN, NaN, ...
+               plating_cap_base, NaN];
+        append_grid_row(fn_csv, row);
+        return;
+    end
+
+    % --- 실행 ---------------------------------------------------------------
+    if ~try_run_study(model, 'std3')
+        if ~try_run_study(model, 'std3')
+            warning('std3 실행 실패, NaN 기록');
+            row = [stage_mode, C1, C2, C3, C4, C5, C6, ...
+                   Irest, duty, Tper, ...
+                   NaN, NaN, NaN, NaN, NaN, ...
+                   plating_cap_base, NaN];
+            append_grid_row(fn_csv, row);
+            return;
+        end
+    end
+
+    % --- 평가: t, liion.Ect, CC/CV flag -----------------------------------
+    expr = {'t','liion.Ect','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+    [ok, D] = try_mpheval(model, expr, 'dset37');
+    if ~ok
+        warning('mpheval 실패, NaN 기록');
+        row = [stage_mode, C1, C2, C3, C4, C5, C6, ...
+               Irest, duty, Tper, ...
+               NaN, NaN, NaN, NaN, NaN, ...
+               plating_cap_base, NaN];
+        append_grid_row(fn_csv, row);
+        return;
+    end
+
+    t    = D.d1;
+    over = D.d2;      % liion.Ect
+    cc   = D.d3;
+    cv   = D.d4;
+    idx  = (cc==1)|(cv==1);
+
+    if ~any(idx)
+        warning('CC/CV 구간이 없음, NaN 기록');
+        row = [stage_mode, C1, C2, C3, C4, C5, C6, ...
+               Irest, duty, Tper, ...
+               NaN, NaN, NaN, NaN, NaN, ...
+               plating_cap_base, NaN];
+        append_grid_row(fn_csv, row);
+        return;
+    end
+
+    Tmin    = min(over(idx));
+    Tcharge = t(find(idx,1,'last'));
+
+    [Tavg_val, Tmax_val] = get_T_peaks(model, 'dset37');
+
+    % ---- plating_cap (pulse 시뮬레이션 끝 시점 값) ----
+    plating_cap_end = NaN;
+    try
+        Gp = mpheval(model, 'plating_cap', ...
+                     'dataset',  'dset37', ...
+                     'edim',     'point', ...
+                     'selection', 2, ...
+                     'solnum',   'all');
+        plating_cap_end = Gp.d1(end);
+    catch
+        warning('plating_cap 평가 실패 → NaN');
+    end
+
+    d_plating = plating_cap_end - plating_cap_base;
+
+    fprintf('   → T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, plating_cap=%.4g, d_plating=%.4g\n', ...
+        Tcharge, Tmin, Tavg_val, Tmax_val, plating_cap_end, d_plating);
+
+    row = [stage_mode, C1, C2, C3, C4, C5, C6, ...
+           Irest, duty, Tper, ...
+           Tcharge, Tmin, Tavg_val, Tmax_val, ...
+           plating_cap_end, ...
+           plating_cap_base, d_plating];
+    append_grid_row(fn_csv, row);
+end
+
+% --------- COMSOL 실행/평가 유틸 ------------------------------------------
+function ok = try_run_study(model, study_id)
+    ok = true;
+    try
+        model.study(study_id).run();
+    catch
+        ok = false;
+    end
+end
+
+function [ok, D] = try_mpheval(model, exprs, dset)
+    ok = true; D = struct();
+    try
+        D = mpheval(model, exprs, ...
+            'dataset',dset,'edim','point','selection',2,'solnum','all');
+    catch
+        ok = false;
+    end
+end
+
+function [T_avg_peak, T_max_peak] = get_T_peaks(model, dset)
+    T_avg_peak = nan; T_max_peak = nan;
+    try
+        G = mpheval(model,'T_avg','dataset',dset,'edim','domain','solnum','all');
+        T_avg_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+    try
+        G = mpheval(model,'T_max','dataset',dset,'edim','domain','solnum','all');
+        T_max_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+end
