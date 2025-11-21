@@ -1,51 +1,47 @@
 % =========================================================================
-% COMSOL-MATLAB: MSCC4 + Pulse Grid Search (RESUME from existing CSV)
+% COMSOL-MATLAB: MSCC4 + Pulse Grid Search (C-rate는 모델에서 직접 읽기)
 %
-%  - 기존에 돌리던 mscc4_pulse_grid_*.csv 를 선택해서
-%    이미 계산된 조합은 건너뛰고, 나머지만 이어서 시뮬레이션
+%  - C-rate:
+%    · COMSOL 모델 파라미터 first_MSCC_Crate ~ sixth_MSCC_Crate 에서 읽어서 사용
 %
-%  - 전제:
-%    · CSV 구조는 기존 스크립트와 동일
-%    · 1행: baseline (stage_mode = 0)
-%    · 2행 이후: stage_mode=1~7, I_rest, duty, pulse_period_s 조합 순서대로
+%  - Baseline:
+%    · pulse_stage_mode = 0 (펄스 OFF) 상태에서 MSCC4 1회 시뮬
+%    · baseline plating_cap (plating_cap_MSCC4_base) 계산
+%
+%  - Grid 변수:
+%    · pulse_stage_mode : 1~7
+%         0: off
+%         1: Stage 2
+%         2: Stage 3
+%         3: Stage 4
+%         4: 2+3
+%         5: 2+4
+%         6: 3+4
+%         7: 2+3+4
+%    · duty_cycle       : 0.5~0.99 (linspace, 10 points)
+%    · I_rest           : [ 1, 0, -1 ]
+%    · pulse_period     : 1~100 s (logscale, 10 points)
+%
+%  - 각 조합마다:
+%    · 충전시간 T, min(liion.Ect)=s, T_avg, T_max, plating_cap_end 계산
+%    · baseline 대비 d_plating = plating_cap_end - plating_cap_MSCC4_base 저장
+%
+%  - study/dataset:
+%    · Baseline (no pulse): std2 / dset3
+%    · Pulse grid:          std3 / dset37
 % =========================================================================
 clc; clear; close all;
 import com.comsol.model.*
 import com.comsol.model.util.*
 
-%% 0) 이어서 돌릴 CSV 선택 ---------------------------------------------------
-pulse_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
-assert(isfolder(pulse_dir), 'Pulse_opt 폴더가 없습니다: %s', pulse_dir);
-
-[fn_csv, fp_csv] = uigetfile(fullfile(pulse_dir, 'pulse_grid_MSCC4_*', 'mscc4_pulse_grid_*.csv'), ...
-    '이어 돌릴 mscc4_pulse_grid_*.csv 를 선택하세요');
-if isequal(fn_csv, 0)
-    error('CSV 파일 선택이 취소되었습니다.');
-end
-
-csv_path = fullfile(fp_csv, fn_csv);
-fprintf('이어 돌릴 CSV: %s\n', csv_path);
-
-% === CSV 읽기 ===
-T = readtable(csv_path);
-n_rows = height(T);
-if n_rows < 2
-    error('CSV에 baseline 및 grid 데이터가 충분히 없습니다 (행 수 = %d).', n_rows);
-end
-
-% 1행은 baseline, 2행 이후가 grid 조합
-done_count = n_rows - 1;   % 이미 계산 완료된 grid 개수
-fprintf('이미 완료된 grid 개수: %d\n', done_count);
-
-% baseline 정보는 1행에서 읽어옴
-Cvec_mscc4 = [T.C1(1), T.C2(1), T.C3(1), T.C4(1), T.C5(1), T.C6(1)];
-plating_cap_MSCC4_base = T.plating_cap_base(1);
-
-fprintf('Baseline C-rate from CSV = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
-fprintf('Baseline plating_cap_MSCC4_base = %.12g\n', plating_cap_MSCC4_base);
+%% 0) 출력 경로 -------------------------------------------------------------
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
+assert(isfolder(fileparts(fig_base_dir)) || isfolder(fig_base_dir), 'Figure 상위 폴더가 유효하지 않습니다.');
+ts = datestr(now,'yyyymmdd_HHMMSS');
+out_dir = fullfile(fig_base_dir, ['pulse_grid_MSCC4_' ts]);
+if ~isfolder(out_dir), mkdir(out_dir); end
 
 %% 1) 모델 로드 --------------------------------------------------------------
-% (기존과 동일한 mph 모델 사용)
 filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
 filename = 'ES_MSCCPC_Final.mph';  % std3/dset37 포함 모델
 full_path = fullfile(filepath, filename);
@@ -53,37 +49,147 @@ assert(isfile(full_path),'mph 파일 없음: %s', full_path);
 
 model = mphload(full_path);
 ModelUtil.showProgress(true);
-disp('모델 불러오기 완료 (resume 모드).');
+disp('모델 불러오기 완료.');
 
-%% 2) Pulse Grid 설정 (기존 스크립트와 동일하게) ---------------------------
+%% 2) MSCC4 최적 C-rate summary 선택 ----------------------------------------
+% Pareto 코드에서 하던 방식처럼:
+%   - base_dir 아래 run_* 선택
+%   - 그 안에서 run_summary_*.mat 선택 (또는 자동 최신)
+
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\MSCC_CCCV_opt';
+assert(isfolder(base_dir), 'summary 기본 폴더가 없습니다: %s', base_dir);
+
+% === 토글: true면 최신 run_* 자동선택, false면 대화형 선택 ===
+use_latest = false;
+
+if use_latest
+    d = dir(fullfile(base_dir, 'run_*'));
+    assert(~isempty(d), 'run_* 폴더가 없습니다. 먼저 최적화 스크립트를 실행하세요.');
+    [~,ix] = max([d.datenum]);
+    run_dir = fullfile(base_dir, d(ix).name);
+else
+    run_dir = uigetdir(base_dir, '최적 C-rate가 저장된 run_* 폴더를 선택하세요');
+    if isstring(run_dir), run_dir = char(run_dir); end
+    assert(~isequal(run_dir,0), '폴더 선택이 취소되었습니다.');
+    [~,selname] = fileparts(run_dir);
+    assert(startsWith(selname,'run_'), '선택한 폴더명이 run_* 형식이 아닙니다: %s', selname);
+end
+
+fprintf('Using summary run dir: %s\n', run_dir);
+
+% 이 run_* 안에서 가장 최신 run_summary_*.mat 하나 선택
+summary_mat = pick_one_file(run_dir, 'run_summary_*.mat');
+fprintf('  summary_mat: %s\n', summary_mat);
+
+S = load(summary_mat);
+
+%% 3) MSCC4 C-rate: Summary에서 읽어서 6-stage로 펼치기 --------------------
+% unified optimization 코드에서 저장한 optimal_C_mscc4 사용
+%   기대 형식: optimal_C_mscc4 = [C1 C2 C34 C56]
+
+if ~isfield(S, 'optimal_C_mscc4')
+    error('선택한 run_summary 파일에 optimal_C_mscc4 변수가 없습니다.');
+end
+
+C1_4 = S.optimal_C_mscc4(1);
+C2_4 = S.optimal_C_mscc4(2);
+C34  = S.optimal_C_mscc4(3);
+C56  = S.optimal_C_mscc4(4);
+
+% 4-step 매핑 → 6 stage로 펼치기
+C3_4 = C34;
+C4_4 = C34;
+C5_4 = C56;
+C6_4 = C56;
+
+Cvec_mscc4 = [C1_4, C2_4, C3_4, C4_4, C5_4, C6_4];   % 1x6 row
+
+fprintf('MSCC4 C-rate from summary = [%.4f %.4f %.4f %.4f %.4f %.4f]\n', Cvec_mscc4);
+
+
+%% 3) Baseline MSCC4 (펄스 OFF) 시뮬레이션 -----------------------------------
+% pulse_stage_mode = 0 → 펄스 완전 OFF
+disp('===== Baseline MSCC4 (no pulse) 시뮬레이션 시작 =====');
+
+model.param.set('pulse_stage_mode',                 '0');
+model.param.set('pulse_rest_current_param_coeffi',  '0');
+model.param.set('duty_cycle', '0.5');   % mode=0이면 실제 pulse에는 안 쓰인다고 가정
+model.param.set('pulse_freq', '1[s]');
+
+ok_base = try_run_study(model, 'std2');
+if ~ok_base
+    error('Baseline MSCC4 (no pulse) std2 실행 실패');
+end
+
+% baseline에서 t, liion.Ect, CC/CV flag, plating_cap, T_avg, T_max 평가
+expr = {'t','liion.Ect','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+[ok_eval_base, Dbase] = try_mpheval(model, expr, 'dset3');
+if ~ok_eval_base
+    error('Baseline mpheval 실패');
+end
+
+t_base    = Dbase.d1;
+over_base = Dbase.d2;
+cc_base   = Dbase.d3;
+cv_base   = Dbase.d4;
+idx_base  = (cc_base==1)|(cv_base==1);
+assert(any(idx_base), 'Baseline에서 CC/CV 구간이 없습니다.');
+
+Tmin_base    = min(over_base(idx_base));
+Tcharge_base = t_base(find(idx_base,1,'last'));
+[Tavg_base, Tmax_base] = get_T_peaks(model, 'dset3');
+
+plating_cap_MSCC4_base = NaN;
+try
+    Gp_base = mpheval(model, 'plating_cap', ...
+                      'dataset',  'dset3', ...
+                      'edim',     'point', ...
+                      'selection', 2, ...
+                      'solnum',   'all');
+    plating_cap_MSCC4_base = Gp_base.d1(end);
+catch
+    warning('Baseline plating_cap 평가 실패 → NaN');
+end
+
+fprintf('Baseline MSCC4: T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, plating_cap=%.4g\n', ...
+    Tcharge_base, Tmin_base, Tavg_base, Tmax_base, plating_cap_MSCC4_base);
+
+%% 4) Pulse Grid 설정 --------------------------------------------------------
 stage_modes = 1:7;          % pulse_stage_mode: 1~7
-Irest_list  = [1, 0, -1];   % I_rest: 1C, 0C, -1C
-duty_list   = linspace(0.5, 0.95, 10);
-Tper_list   = logspace(0, 2, 10);      % 1~100 s
+Irest_list = [1, 0, -1];    % I_rest: 1C, 0C, -1C
+duty_list  = linspace(0.5, 0.95, 10);
+Tper_list  = logspace(0, 2, 10);      % 1~100 s
 
 N_total = numel(stage_modes) * numel(Irest_list) * numel(duty_list) * numel(Tper_list);
-fprintf('총 grid 개수(이론): %d\n', N_total);
+fprintf('총 시뮬레이션 개수 (예정): %d\n', N_total);
 
-if done_count > N_total
-    warning('CSV에 있는 grid 개수(%d)가 설정된 N_total(%d)보다 많습니다. 설정을 확인하세요.', ...
-        done_count, N_total);
-end
+% 결과 로그 CSV
+fn_mscc4_grid = fullfile(out_dir, ['mscc4_pulse_grid_' ts '.csv']);
 
-if done_count == N_total
-    fprintf('이미 모든 grid가 완료된 CSV입니다. 추가로 돌릴 것이 없습니다.\n');
-    return;
-end
+header_cols = {'stage_mode', ...
+               'C1','C2','C3','C4','C5','C6', ...
+               'I_rest','duty','pulse_period_s', ...
+               'T','s','T_avg','T_max','plating_cap', ...
+               'plating_cap_base','d_plating'};
+init_csv(fn_mscc4_grid, header_cols);
 
-% CSV는 이미 존재하므로 init_csv / baseline 기록은 안 함
-fn_mscc4_grid = csv_path;
+%% 5) Baseline도 CSV에 한 줄 기록 (stage_mode = 0) -------------------------
+row0 = [ ...
+    0, ...                           % stage_mode (0 = no pulse)
+    Cvec_mscc4(:).', ...             % C1..C6 (row 강제)
+    0, 0.5, 1, ...                   % I_rest, duty, Tper (형식 맞추기용 값)
+    Tcharge_base, Tmin_base, Tavg_base, Tmax_base, ...
+    plating_cap_MSCC4_base, ...
+    plating_cap_MSCC4_base, ...      % plating_cap_base
+    0];                              % d_plating = 0
+append_grid_row(fn_mscc4_grid, row0);
 
-%% 3) Grid Search 루프 (이어서) ----------------------------------------------
-cnt = 0;   % 전체 grid index (1-based, 기존 코드와 동일)
-
+%% 6) Grid Search 루프 -------------------------------------------------------
+cnt = 0;
 tic;
 for im = 1:numel(stage_modes)
     stage_mode = stage_modes(im);
-    fprintf('\n===== pulse_stage_mode = %d 진행 중 =====\n', stage_mode);
+    fprintf('\n===== pulse_stage_mode = %d 시작 =====\n', stage_mode);
 
     for ir = 1:numel(Irest_list)
         Irest = Irest_list(ir);
@@ -94,15 +200,8 @@ for im = 1:numel(stage_modes)
             for ip = 1:numel(Tper_list)
                 Tper = Tper_list(ip);
 
-                cnt = cnt + 1;   % 이 조합의 글로벌 인덱스 (1~N_total)
-
-                % --- 이미 끝난 조합은 건너뛰기 --------------------------------
-                if cnt <= done_count
-                    % fprintf('[%4d/%4d] 이미 완료된 조합, 건너뜀.\n', cnt, N_total);
-                    continue;
-                end
-
-                fprintf('\n[RESUME %4d / %4d] mode=%d, Irest=%.1f, duty=%.3f, Tper=%.2f s\n', ...
+                cnt = cnt + 1;
+                fprintf('\n[%4d / %4d] mode=%d, Irest=%.1f, duty=%.3f, Tper=%.2f s\n', ...
                         cnt, N_total, stage_mode, Irest, duty, Tper);
 
                 eval_PULSE_GRID_MSCC4(model, ...
@@ -114,9 +213,26 @@ for im = 1:numel(stage_modes)
 end
 toc;
 
-fprintf('\nRESUME 완료. CSV 계속 사용: %s\n', fn_mscc4_grid);
+fprintf('\n모든 grid 시뮬레이션 종료. CSV: %s\n', fn_mscc4_grid);
+
+%% 7) 요약 MAT 저장 ---------------------------------------------------------
+save(fullfile(out_dir, ['MSCC4_pulse_grid_' ts '.mat']), ...
+    'Cvec_mscc4', ...
+    'stage_modes','Irest_list','duty_list','Tper_list', ...
+    'plating_cap_MSCC4_base', ...
+    'Tcharge_base','Tmin_base','Tavg_base','Tmax_base', ...
+    'fn_mscc4_grid');
+
+fprintf('MAT 저장 완료. 출력 폴더: %s\n', out_dir);
 
 % ======================= Local helper functions ==========================
+
+function init_csv(fn, names)
+    if ~isfile(fn)
+        T = cell2table(cell(0,numel(names)), 'VariableNames', names);
+        writetable(T, fn);
+    end
+end
 
 function append_grid_row(fn, row)
     % 안전하게 row vector로 변환
@@ -259,6 +375,7 @@ function eval_PULSE_GRID_MSCC4(model, Cvec6, stage_mode, Irest, duty, Tper, ...
 end
 
 % --------- COMSOL 실행/평가 유틸 ------------------------------------------
+
 function ok = try_run_study(model, study_id)
     ok = true;
     try
@@ -288,4 +405,10 @@ function [T_avg_peak, T_max_peak] = get_T_peaks(model, dset)
         G = mpheval(model,'T_max','dataset',dset,'edim','domain','solnum','all');
         T_max_peak = max(G.d1(:),[],'omitnan');
     catch, end
+end
+function fpath = pick_one_file(folder, pattern)
+    L = dir(fullfile(folder, pattern));
+    assert(~isempty(L), '파일이 없습니다: %s', fullfile(folder, pattern));
+    [~,ix] = max([L.datenum]);           % 가장 최신 파일
+    fpath = fullfile(L(ix).folder, L(ix).name);
 end
