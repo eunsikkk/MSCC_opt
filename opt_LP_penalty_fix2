@@ -40,7 +40,7 @@ fn_mscc4 = fullfile(out_dir, ['mscc4_optimization_log_' ts '.csv']);
 
 %% 2) 모델 로드 --------------------------------------------------------------
 filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
-filename = 'ES_MSCCPC_Final_1119.mph';   % std1/dset1, std2/dset3 포함 모델
+filename = 'ES_MSCCPC_Final_lowT.mph';   % std1/dset1, std2/dset3 포함 모델
 full_path = fullfile(filepath, filename);
 assert(isfile(full_path),'mph 파일 없음: %s', full_path);
 
