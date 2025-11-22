@@ -22,7 +22,7 @@ import com.comsol.model.util.*
 %% 0) 공통 파라미터 ----------------------------------------------------------
 safety_eps     = -0.01;    % min(liion.Ect) 기록용 (제약에는 안 씀, 나중 해석용)
 plating_eps    = 0.0002;   % 허용 Li plating 상한 (<= 이면 OK)
-N_EVALS        = 500;      % surrogateopt 평가 횟수
+N_EVALS        = 100;      % surrogateopt 평가 횟수
 
 alpha_reward   = 300;      % ▶ plating 보상 계수: eps까지 꽉 쓰면 t에서 ~300 s 보너스 효과
 PEN            = 1e7;      % 평가 실패/제약 심각 위반 시 큰 cost (feasible 해보다 항상 나쁨)
@@ -45,7 +45,7 @@ fn_mscc4_ref = fullfile(out_dir, ['mscc4_refine_log_'           ts '.csv']);
 
 %% 2) 모델 로드 --------------------------------------------------------------
 filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
-filename = 'ES_MSCCPC_Final_lowT.mph';   % std1/dset1, std2/dset3 포함 모델
+filename = 'ES_MSCCPC_Final.mph';   % std1/dset1, std2/dset3 포함 모델
 full_path = fullfile(filepath, filename);
 assert(isfile(full_path),'mph 파일 없음: %s', full_path);
 
