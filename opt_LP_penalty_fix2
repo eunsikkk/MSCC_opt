@@ -1,0 +1,347 @@
+% =========================================================================
+% COMSOL-MATLAB: Optimization (CCCV, MSCC-2step, MSCC-4step)
+%  - 목적함수 (제약 만족 시):
+%       cost = t_charge - alpha_reward * (plating_cap_end / plating_eps)
+%    · t_charge를 최소화하면서, 제약 안에서 Li plating budget을 최대한 활용
+%
+%  - 제약:
+%       plating_cap_end <= plating_eps
+%
+%  - s = min(liion.Ect)는 "나중 해석용"으로 CSV에만 기록 (제약에는 사용 X)
+%
+%  - Step별 매핑:
+%    · 2step:  [first=second]=C12, [third=fourth=fifth=sixth]=C3456
+%    · 4step:   first=C1, second=C2, [third=fourth]=C34, [fifth=sixth]=C56
+%
+%  - 로깅: [t, s(=min(liion.Ect)), cv_frac, E_Wh, Vdiff_min/max, T_avg, T_max, plating_cap]
+% =========================================================================
+clc; clear; close all;
+import com.comsol.model.*
+import com.comsol.model.util.*
+
+%% 0) 공통 파라미터 ----------------------------------------------------------
+safety_eps     = -0.01;    % min(liion.Ect) 기록용 (제약에는 안 씀, 나중 해석용)
+plating_eps    = 0.0002;   % 허용 Li plating 상한 (<= 이면 OK)
+N_EVALS        = 500;      % surrogateopt 평가 횟수
+
+alpha_reward   = 300;      % ▶ plating 보상 계수: eps까지 꽉 쓰면 t에서 ~300 s 보너스 효과
+PEN            = 1e7;      % 평가 실패/제약 심각 위반 시 큰 cost (feasible 해보다 항상 나쁨)
+
+%% 1) 경로/출력 폴더 ---------------------------------------------------------
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\MSCC_CCCV_opt';
+assert(isfolder(base_dir), '기본 폴더가 없습니다: %s', base_dir);
+ts = datestr(now,'yyyymmdd_HHMMSS');
+out_dir = fullfile(base_dir, ['run_' ts]);
+if ~isfolder(out_dir), mkdir(out_dir); end
+
+fn_cccv  = fullfile(out_dir, ['cccv_optimization_log_'  ts '.csv']);
+fn_mscc2 = fullfile(out_dir, ['mscc2_optimization_log_' ts '.csv']);
+fn_mscc4 = fullfile(out_dir, ['mscc4_optimization_log_' ts '.csv']);
+
+%% 2) 모델 로드 --------------------------------------------------------------
+filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
+filename = 'ES_MSCCPC_Final_1119.mph';   % std1/dset1, std2/dset3 포함 모델
+full_path = fullfile(filepath, filename);
+assert(isfile(full_path),'mph 파일 없음: %s', full_path);
+
+model = mphload(full_path);
+ModelUtil.showProgress(true);
+disp('모델 불러오기 완료.');
+
+%% 3) CSV 헤더 생성 ----------------------------------------------------------
+% CCCV: [C, t, s, cv_frac, E_Wh, Vdiff_min, Vdiff_max, T_avg, T_max, plating_cap]
+init_csv(fn_cccv,  {'C','t','s','cv_frac','E_Wh','Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+
+% MSCC2: [C12 C3456, ...]
+init_csv(fn_mscc2, {'C12','C3456','t','s','cv_frac','E_Wh','Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+
+% MSCC4: [C1 C2 C34 C56, ...]
+init_csv(fn_mscc4, {'C1','C2','C34','C56','t','s','cv_frac','E_Wh','Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+
+
+%% 4) 최적화: CCCV ----------------------------------------------------------
+disp('===== CCCV 최적화를 시작합니다 (목적: t - alpha*(plating/eps), 제약: plating_cap <= eps) =====');
+lb_cccv = 0.1;  ub_cccv = 6.0;
+
+obj_cccv = @(C) evaluate_and_log_CCCV(C, model, ...
+    plating_eps, alpha_reward, PEN, fn_cccv);
+
+opts_cccv = optimoptions('surrogateopt', ...
+    'MaxFunctionEvaluations', N_EVALS, ...
+    'Display','iter', 'PlotFcn','surrogateoptplot');
+
+[optimal_C_rate, cccv_min_t, exitflag_cccv, output_cccv, trials_cccv] = ...
+    surrogateopt(obj_cccv, lb_cccv, ub_cccv, opts_cccv);
+
+fprintf('\n--- CCCV 결과 ---\n');
+fprintf('최적 (cost 기준) t = %.2f s, 최적 C = %.3f C\n\n', cccv_min_t, optimal_C_rate);
+
+%% 5) 최적화: MSCC 2-step ---------------------------------------------------
+% 매핑: first=second=C12, third=fourth=fifth=sixth=C3456
+disp('===== MSCC (2-step) 최적화를 시작합니다 (목적: t - alpha*(plating/eps)) =====');
+lb_mscc2 = [0.1 0.1];  ub_mscc2 = [8.0 6.0];
+
+obj_mscc2 = @(Cx) evaluate_and_log_MSCC2(Cx, model, ...
+    plating_eps, alpha_reward, PEN, fn_mscc2);
+
+opts_mscc2 = optimoptions('surrogateopt', ...
+    'MaxFunctionEvaluations', N_EVALS, ...
+    'Display','iter', 'PlotFcn','surrogateoptplot');
+
+[optimal_C_mscc2, mscc2_min_t, exitflag_mscc2, output_mscc2, trials_mscc2] = ...
+    surrogateopt(obj_mscc2, lb_mscc2, ub_mscc2, opts_mscc2);
+
+fprintf('\n--- MSCC2 결과 ---\n');
+fprintf('최적 (cost 기준) t = %.2f s, 최적 [C12 C3456] = [%.3f %.3f]\n\n', ...
+    mscc2_min_t, optimal_C_mscc2);
+
+%% 6) 최적화: MSCC 4-step ---------------------------------------------------
+% 매핑: first=C1, second=C2, third=fourth=C34, fifth=sixth=C56
+disp('===== MSCC (4-step) 최적화를 시작합니다 (목적: t - alpha*(plating/eps)) =====');
+lb_mscc4 = [0.1 0.1 0.1 0.1];  ub_mscc4 = [8.0 6.0 6.0 6.0];
+
+obj_mscc4 = @(C) evaluate_and_log_MSCC4(C, model, ...
+    plating_eps, alpha_reward, PEN, fn_mscc4);
+
+opts_mscc4 = optimoptions('surrogateopt', ...
+    'MaxFunctionEvaluations', N_EVALS, ...
+    'Display','iter', 'PlotFcn','surrogateoptplot');
+
+[optimal_C_mscc4, mscc4_min_t, exitflag_mscc4, output_mscc4, trials_mscc4] = ...
+    surrogateopt(obj_mscc4, lb_mscc4, ub_mscc4, opts_mscc4);
+
+fprintf('\n--- MSCC4 결과 ---\n');
+fprintf('최적 (cost 기준) t = %.2f s, 최적 [C1 C2 C34 C56] = [%.3f %.3f %.3f %.3f]\n\n', ...
+    mscc4_min_t, optimal_C_mscc4);
+
+%% 7) 요약 MAT 저장 ---------------------------------------------------------
+save(fullfile(out_dir, ['run_summary_' ts '.mat']), ...
+    'safety_eps','plating_eps','N_EVALS','PEN','alpha_reward', ...
+    'full_path','out_dir', ...
+    'optimal_C_rate','cccv_min_t','exitflag_cccv','output_cccv','trials_cccv', ...
+    'optimal_C_mscc2','mscc2_min_t','exitflag_mscc2','output_mscc2','trials_mscc2', ...
+    'optimal_C_mscc4','mscc4_min_t','exitflag_mscc4','output_mscc4','trials_mscc4');
+
+fprintf('CSV/MAT 저장 완료. 출력 폴더: %s\n', out_dir);
+
+% ============================ Local Functions =============================
+function init_csv(fn, names)
+    if ~isfile(fn)
+        T = cell2table(cell(0,numel(names)), 'VariableNames', names);
+        writetable(T, fn);
+    end
+end
+
+function [t_charge, s, cv_frac, E_Wh, vmin, vmax, T_avg, T_max, plating_cap_end] = ...
+    postproc_common(model, dset)
+
+    expr = {'t','E_cell','liion.cdc1.Icell','SOC','liion.Ect', ...
+            'liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+    D = mpheval(model, expr, 'dataset', dset, 'edim','point', ...
+                'selection', 2, 'solnum','all');
+    t  = D.d1;
+    E  = D.d2;
+    I  = D.d3;
+    v  = D.d5;   % liion.Ect
+    cc = D.d6;
+    cv = D.d7;
+
+    idx = (cc==1) | (cv==1);
+    [T_avg, T_max] = get_T_peaks(model, dset);
+
+    plating_cap_end = nan;  % 기본값
+
+    if ~any(idx)
+        t_charge = 1e9;
+        s        = -inf;
+        cv_frac  = nan;
+        E_Wh     = nan;
+        vmin     = nan;
+        vmax     = nan;
+        plating_cap_end = nan;
+        return;
+    end
+
+    tchg  = t(idx); Echg = E(idx); Ichg = I(idx);
+    vchg  = v(idx); cvchg = cv(idx);
+
+    t_charge = tchg(end);
+    s        = min(vchg);          % min(liion.Ect) -> 기록용
+    cv_frac  = mean(cvchg==1);
+    E_Wh     = trapz(tchg, Echg.*Ichg)/3600;
+    vmin     = min(vchg);
+    vmax     = max(vchg);
+
+    % ---- plating_cap (COMSOL에서 정의한 변수) 평가 ----
+    try
+        Gp = mpheval(model, 'plating_cap', 'dataset', dset, 'solnum','all');
+        plating_cap_end = Gp.d1(end);
+    catch
+        plating_cap_end = nan;
+    end
+end
+
+% ---------------- Objective: CCCV -----------------------------------------
+% cost = t_charge - alpha_reward * (plating_cap_end / plating_eps)
+function cost = evaluate_and_log_CCCV(C_rate, model, ...
+    plating_eps, alpha_reward, PEN, fn_csv)
+
+    persistent fcnt; if isempty(fcnt), fcnt=0; end; fcnt=fcnt+1;
+    fprintf('[CCCV  F%04d] C=%.6g (%s)\n', fcnt, C_rate, datestr(now,'HH:MM:SS.FFF'));
+
+    try
+        model.param.set('C_rate', num2str(C_rate));
+        model.study('std1').run();
+
+        [t_charge, s, cv_frac, E_Wh, vmin, vmax, T_avg, T_max, plating_cap_end] = ...
+            postproc_common(model,'dset1');
+
+        if ~isfinite(plating_cap_end) || isnan(plating_cap_end)
+            % 평가 실패 → 큰 패널티
+            cost = PEN;
+        elseif plating_cap_end > plating_eps
+            % 제약 위반 → feasiable 해보다 항상 나쁘게
+            viol_rel = (plating_cap_end - plating_eps) / max(plating_eps, 1e-12);
+            cost = PEN + viol_rel^2;
+        else
+            % 제약 만족: t - alpha * (plating/eps)
+            p = plating_cap_end / max(plating_eps, 1e-12);   % 0 ~ 1 정도
+            cost = t_charge - alpha_reward * p;
+        end
+
+        T = table(C_rate, t_charge, s, cv_frac, E_Wh, ...
+                  vmin, vmax, T_avg, T_max, plating_cap_end, ...
+            'VariableNames', {'C','t','s','cv_frac','E_Wh', ...
+                              'Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+        writetable(T, fn_csv, 'WriteMode','Append');
+
+        fprintf('   → t = %.2f s, s_min = %.4f V, plating_cap = %.6g, cost = %.6g\n', ...
+            t_charge, s, plating_cap_end, cost);
+
+    catch ME
+        warning('CCCV 실패: %s', ME.message);
+        T = table(C_rate, 1e9, -inf, nan, nan, nan, nan, nan, nan, nan, ...
+            'VariableNames', {'C','t','s','cv_frac','E_Wh', ...
+                              'Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+        writetable(T, fn_csv, 'WriteMode','Append');
+        cost = PEN;
+    end
+end
+
+% ---------------- Objective: MSCC2 ---------------------------------------
+function cost = evaluate_and_log_MSCC2(Cx, model, ...
+    plating_eps, alpha_reward, PEN, fn_csv)
+
+    % 매핑: first=second=C12, third=fourth=fifth=sixth=C3456
+    persistent fcnt; if isempty(fcnt), fcnt=0; end; fcnt=fcnt+1;
+    C12    = Cx(1);
+    C3456  = Cx(2);
+    fprintf('[MSCC2 F%04d] C12=%.6g, C3456=%.6g (%s)\n', ...
+        fcnt, C12, C3456, datestr(now,'HH:MM:SS.FFF'));
+
+    try
+        model.param.set('first_MSCC_Crate',  num2str(C12));
+        model.param.set('second_MSCC_Crate', num2str(C12));
+        model.param.set('third_MSCC_Crate',  num2str(C3456));
+        model.param.set('fourth_MSCC_Crate', num2str(C3456));
+        model.param.set('fifth_MSCC_Crate',  num2str(C3456));
+        model.param.set('sixth_MSCC_Crate',  num2str(C3456));
+
+        model.study('std2').run();
+        [t_charge, s, cv_frac, E_Wh, vmin, vmax, T_avg, T_max, plating_cap_end] = ...
+            postproc_common(model,'dset3');
+
+        if ~isfinite(plating_cap_end) || isnan(plating_cap_end)
+            cost = PEN;
+        elseif plating_cap_end > plating_eps
+            viol_rel = (plating_cap_end - plating_eps) / max(plating_eps, 1e-12);
+            cost = PEN + viol_rel^2;
+        else
+            p = plating_cap_end / max(plating_eps, 1e-12);
+            cost = t_charge - alpha_reward * p;
+        end
+
+        T = table(C12, C3456, t_charge, s, cv_frac, E_Wh, ...
+                  vmin, vmax, T_avg, T_max, plating_cap_end, ...
+            'VariableNames', {'C12','C3456','t','s','cv_frac','E_Wh', ...
+                              'Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+        writetable(T, fn_csv, 'WriteMode','Append');
+
+        fprintf('   → t = %.2f s, s_min = %.4f V, plating_cap = %.6g, cost = %.6g\n', ...
+            t_charge, s, plating_cap_end, cost);
+
+    catch ME
+        warning('MSCC2 실패: %s', ME.message);
+        T = table(C12, C3456, 1e9, -inf, nan, nan, nan, nan, nan, nan, nan, ...
+            'VariableNames', {'C12','C3456','t','s','cv_frac','E_Wh', ...
+                              'Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+        writetable(T, fn_csv, 'WriteMode','Append');
+        cost = PEN;
+    end
+end
+
+% ---------------- Objective: MSCC4 ---------------------------------------
+function cost = evaluate_and_log_MSCC4(C, model, ...
+    plating_eps, alpha_reward, PEN, fn_csv)
+
+    persistent fcnt; if isempty(fcnt), fcnt=0; end; fcnt=fcnt+1;
+    C1  = C(1);
+    C2  = C(2);
+    C34 = C(3);
+    C56 = C(4);
+    fprintf('[MSCC4 F%04d] C1=%.6g, C2=%.6g, C34=%.6g, C56=%.6g (%s)\n', ...
+        fcnt, C1, C2, C34, C56, datestr(now,'HH:MM:SS.FFF'));
+
+    try
+        model.param.set('first_MSCC_Crate',  num2str(C1));
+        model.param.set('second_MSCC_Crate', num2str(C2));
+        model.param.set('third_MSCC_Crate',  num2str(C34));
+        model.param.set('fourth_MSCC_Crate', num2str(C34));
+        model.param.set('fifth_MSCC_Crate',  num2str(C56));
+        model.param.set('sixth_MSCC_Crate',  num2str(C56));
+
+        model.study('std2').run();
+        [t_charge, s, cv_frac, E_Wh, vmin, vmax, T_avg, T_max, plating_cap_end] = ...
+            postproc_common(model,'dset3');
+
+        if ~isfinite(plating_cap_end) || isnan(plating_cap_end)
+            cost = PEN;
+        elseif plating_cap_end > plating_eps
+            viol_rel = (plating_cap_end - plating_eps) / max(plating_eps, 1e-12);
+            cost = PEN + viol_rel^2;
+        else
+            p = plating_cap_end / max(plating_eps, 1e-12);
+            cost = t_charge - alpha_reward * p;
+        end
+
+        T = table(C1, C2, C34, C56, t_charge, s, cv_frac, E_Wh, ...
+                  vmin, vmax, T_avg, T_max, plating_cap_end, ...
+            'VariableNames', {'C1','C2','C34','C56','t','s','cv_frac','E_Wh', ...
+                              'Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+        writetable(T, fn_csv, 'WriteMode','Append');
+
+        fprintf('   → t = %.2f s, s_min = %.4f V, plating_cap = %.6g, cost = %.6g\n', ...
+            t_charge, s, plating_cap_end, cost);
+
+    catch ME
+        warning('MSCC4 실패: %s', ME.message);
+        T = table(C1, C2, C34, C56, 1e9, -inf, nan, nan, nan, nan, nan, nan, nan, ...
+            'VariableNames', {'C1','C2','C34','C56','t','s','cv_frac','E_Wh', ...
+                              'Vdiff_min','Vdiff_max','T_avg','T_max','plating_cap'});
+        writetable(T, fn_csv, 'WriteMode','Append');
+        cost = PEN;
+    end
+end
+
+% ---------- 온도 피크 취득 --------------------------------------------------
+function [T_avg_peak, T_max_peak] = get_T_peaks(model, dset)
+    T_avg_peak = nan; T_max_peak = nan;
+    try
+        G = mpheval(model,'T_avg','dataset',dset,'edim','domain','solnum','all');
+        T_avg_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+    try
+        G = mpheval(model,'T_max','dataset',dset,'edim','domain','solnum','all');
+        T_max_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+end
