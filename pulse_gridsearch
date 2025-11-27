@@ -43,7 +43,7 @@ if ~isfolder(out_dir), mkdir(out_dir); end
 
 %% 1) 모델 로드 --------------------------------------------------------------
 filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
-filename = 'ES_MSCCPC_Final_lowT.mph';  % std3/dset37 포함 모델
+filename = 'ES_MSCCPC_Final.mph';  % std3/dset37 포함 모델
 full_path = fullfile(filepath, filename);
 assert(isfile(full_path),'mph 파일 없음: %s', full_path);
 
@@ -155,8 +155,8 @@ fprintf('Baseline MSCC4: T=%.2f s, min(Ect)=%.4f V, Tavg=%.2f, Tmax=%.2f, platin
     Tcharge_base, Tmin_base, Tavg_base, Tmax_base, plating_cap_MSCC4_base);
 
 %% 4) Pulse Grid 설정 --------------------------------------------------------
-stage_modes = 1:7;          % pulse_stage_mode: 1~7
-Irest_list = [1, 0, -1];    % I_rest: 1C, 0C, -1C
+stage_modes = 4:7;          % pulse_stage_mode: 1~7
+Irest_list = 0;    % I_rest: 1C, 0C, -1C
 duty_list  = linspace(0.5, 0.95, 10);
 Tper_list  = logspace(0, 2, 10);      % 1~100 s
 
